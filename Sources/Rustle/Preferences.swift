@@ -31,6 +31,7 @@ final class Preferences {
         static let breeze = "breeze"
         static let accumulate = "accumulate"
         static let windClears = "windClears"
+        static let crumble = "crumble"
         static let leavesOnWindows = "leavesOnWindows"
         static let crunchSound = "crunchSound"
         static let behindWindows = "behindWindows"
@@ -43,6 +44,7 @@ final class Preferences {
             Key.breeze: Breeze.breezy.rawValue,
             Key.accumulate: true,
             Key.windClears: true,
+            Key.crumble: true,
             Key.leavesOnWindows: true,
             Key.crunchSound: true,
             Key.behindWindows: false,
@@ -70,6 +72,12 @@ final class Preferences {
     var windClears: Bool {
         get { defaults.bool(forKey: Key.windClears) }
         set { defaults.set(newValue, forKey: Key.windClears) }
+    }
+
+    /// Old leaves dry, brown and crumble away, so the pile thins slowly from below.
+    var crumble: Bool {
+        get { defaults.bool(forKey: Key.crumble) }
+        set { defaults.set(newValue, forKey: Key.crumble) }
     }
 
     var leavesOnWindows: Bool {

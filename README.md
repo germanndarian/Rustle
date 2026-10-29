@@ -9,6 +9,7 @@ A small native menu-bar app (Swift, AppKit, SpriteKit). No permissions needed.
 - **Fall.** Maple, oak, birch, beech, ginkgo and sweetgum leaves in golds, ambers, reds and browns. Each one swings and rocks like a real falling leaf, and some tumble.
 - **Pile up.** They settle into a heap along the bottom of the screen and slump to a natural slope. They also settle on the top edges of windows that have room above them.
 - **Crunch.** Push the cursor through the pile and the leaves fly up and fall back. With **Sound** on, you hear dry leaves crunching. The sound is synthesized live, so it never repeats, and it gets fuller the faster and deeper you go.
+- **Crumble.** With **Leaves Crumble** on, leaves that have lain in the pile a while dry out, turn a dull brown and crumble into flakes, so the pile thins slowly from below, the way snow melts. The deeper the pile, the sooner they go.
 - **Rake.** Pick up the rake from the menu and your cursor becomes one. Hold the mouse button and drag: the leaves gather in the tines and come along until you let go, so you can rake them into heaps.
 - **Leaf blower.** Pick up the leaf blower and hold the mouse button to blow. It faces the way you last moved, and scrolling aims the nozzle up or down. It lifts leaves off the pile and can blow them right off the screen, with a soft electric whoosh.
 - **Blow away.** With **Wind Blows Leaves Away** on, a gust sweeps across the screen every so often and carries part of the pile away. The fuller the pile, the stronger and more frequent the gusts, so it never takes over your screen. Turn it off and the leaves stay.
@@ -23,6 +24,7 @@ A small native menu-bar app (Swift, AppKit, SpriteKit). No permissions needed.
 | Breeze: Calm, Breezy, Gusty | How much the wind pushes the falling leaves around. |
 | Accumulate | Leaves pile up. When off, they land and fade. |
 | Wind Blows Leaves Away | Gusts now and then blow the pile off the screen. |
+| Leaves Crumble | Old leaves dry out and crumble away, so the pile never gets too deep. |
 | Leaves on Windows | Leaves settle on window tops. |
 | Sound | Crunching leaves, the rake's rustle, and the blower's whoosh. |
 | Clear Leaves | One big gust carries everything away. |
@@ -30,6 +32,10 @@ A small native menu-bar app (Swift, AppKit, SpriteKit). No permissions needed.
 | Behind Windows | Leaves fall on the desktop, behind your windows. |
 | Show in Screenshots | Include the leaves in screenshots and screen recordings. |
 | Open at Login | Start Rustle when you log in. |
+
+## Website
+
+`site/` is the Rustle website: the app's real leaves running live in the browser, with a working copy of the menu. It deploys to GitHub Pages from `main` through `.github/workflows/pages.yml`.
 
 ## Build
 
@@ -66,6 +72,7 @@ Set these environment variables when launching `build/Rustle.app/Contents/MacOS/
 | `RUSTLE_FAKE_CURSOR=1` | Sweeps a virtual cursor back and forth through the pile. |
 | `RUSTLE_FAKE_WINDOWS=1` | Adds two pretend windows; the front one is "dragged" after 25 s. |
 | `RUSTLE_FAKE_TOOL=rake` or `blower` | With `RUSTLE_FAKE_CURSOR`, uses that tool, pressed for 8 s out of every 12. |
+| `RUSTLE_CRUMBLE_FAST=1` | Ages resting leaves ten times faster, to watch them crumble. |
 | `RUSTLE_GUST_AT=8`, `RUSTLE_CLEAR_AT=20` | With `RUSTLE_DEBUG`, a blow-away gust or a Clear Leaves at that many seconds. |
 
 Settings can also be passed as arguments, e.g. `-leafFall heavy -breeze gusty`.

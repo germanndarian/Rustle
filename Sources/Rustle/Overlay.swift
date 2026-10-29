@@ -88,6 +88,7 @@ final class OverlayController {
             : NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.dockWindow)) - 1)
         let settings = SceneSettings(fall: prefs.leafFall, breeze: prefs.breeze, accumulate: prefs.accumulate,
                                      windClears: prefs.windClears && prefs.accumulate,
+                                     crumble: prefs.crumble && prefs.accumulate,
                                      onWindows: prefs.leavesOnWindows && !behind,
                                      savePower: power.savesPower)
         audio.isEnabled = prefs.crunchSound

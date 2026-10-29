@@ -323,6 +323,7 @@ footer a { color: var(--muted); }
       <div class="menu-sep"></div>
       <button class="mi" role="menuitemcheckbox" data-toggle="accumulate"><span class="check">✓</span>Accumulate</button>
       <button class="mi" role="menuitemcheckbox" data-toggle="windClears"><span class="check">✓</span>Wind Blows Leaves Away</button>
+      <button class="mi" role="menuitemcheckbox" data-toggle="crumble"><span class="check">✓</span>Leaves Crumble</button>
       <button class="mi" role="menuitemcheckbox" data-toggle="onWindows"><span class="check">✓</span>Leaves on Windows</button>
       <button class="mi" role="menuitemcheckbox" data-toggle="sound"><span class="check">✓</span>Sound</button>
       <button class="mi" role="menuitem" id="clear-btn"><span class="check">✓</span>Clear Leaves</button>
@@ -348,6 +349,7 @@ footer a { color: var(--muted); }
       <div><dt>Pile up</dt><dd>They gather along the bottom of the screen and slump to a natural slope. They settle on any window with room above it, too.</dd></div>
       <div><dt>Crunch</dt><dd>Sweep the cursor through the pile and the leaves fly up with a dry crunch. The sound is made live from thousands of tiny crackles, so it never repeats.</dd></div>
       <div><dt>Blow away</dt><dd>Every so often a gust sweeps across and carries part of the pile off the screen, more often when the pile is deep. Turn it off and the leaves stay.</dd></div>
+      <div><dt>Crumble</dt><dd>Leaves that have lain in the pile a while dry out, turn a dull brown and crumble into flakes, so the pile thins slowly from below, the way snow melts. The deeper the pile, the sooner they go.</dd></div>
       <div><dt>Rake</dt><dd>Pick up the rake, hold the mouse button and drag. Leaves catch in the tines and come along until you let go, so you can rake them into heaps.</dd></div>
       <div><dt>Blow</dt><dd>The leaf blower lifts leaves off the pile and pushes them wherever it points, with a soft electric whoosh. Scroll to aim the nozzle.</dd></div>
       <div><dt>Slide off</dt><dd>Drag a window and its leaves slide off with it. Close or minimize it and they drop. Switch Spaces and they come back with the window.</dd></div>
@@ -437,17 +439,22 @@ footer a { color: var(--muted); }
 
   function buildSheets() {
     sheets.length = 0;
-    for (const dark of [0, 0.13, 0.26, 0.38]) {
-      const c = document.createElement("canvas");
-      c.width = sheet.naturalWidth; c.height = sheet.naturalHeight;
-      const g = c.getContext("2d");
-      g.drawImage(sheet, 0, 0);
-      if (dark > 0) {
+    for (const dry of [0, 0.5, 1]) {
+      const row = [];
+      for (const dark of [0, 0.13, 0.26, 0.38]) {
+        const c = document.createElement("canvas");
+        c.width = sheet.naturalWidth; c.height = sheet.naturalHeight;
+        const g = c.getContext("2d");
+        // Drying leaches the colour out and leaves a dull tan.
+        if (dry > 0) g.filter = `saturate(${1 - 0.6 * dry})`;
+        g.drawImage(sheet, 0, 0);
+        g.filter = "none";
         g.globalCompositeOperation = "source-atop";
-        g.fillStyle = `rgba(12, 8, 4, ${dark})`;
-        g.fillRect(0, 0, c.width, c.height);
+        if (dry > 0) { g.fillStyle = `rgba(118, 90, 62, ${0.32 * dry})`; g.fillRect(0, 0, c.width, c.height); }
+        if (dark > 0) { g.fillStyle = `rgba(12, 8, 4, ${dark})`; g.fillRect(0, 0, c.width, c.height); }
+        row.push(c);
       }
-      sheets.push(c);
+      sheets.push(row);
     }
   }
   function buildPuff() {
@@ -479,7 +486,7 @@ footer a { color: var(--muted); }
   }
 
   // ---------- Settings ----------
-  const S = { fall: "steady", breeze: "breezy", accumulate: true, windClears: true, onWindows: true, sound: false, behind: false, tool: "none" };
+  const S = { fall: "steady", breeze: "breezy", accumulate: true, windClears: true, crumble: true, onWindows: true, sound: false, behind: false, tool: "none" };
   const tool = { pressed: false, facing: 1, angle: 0.55, drift: 0 };
 
   // ---------- Model ----------
@@ -530,7 +537,7 @@ footer a { color: var(--muted); }
       fall: rnd(46, 86), drag: rnd(1.8, 2.8), catchW: rnd(0.8, 1.1), shade: rnd(0, 0.12), depth: 0, alpha: 1,
       surface: null, column: -1, thick: 4, rx: 0, ry: 0, ra: 0, rxs: 1, relY: 0,
       st: 0, sd: 0.3, fx: 0, fy: 0, fa: 0, fxs: 1, fdepth: 0, ephemeral: false, fadeDelay: 0, fadeT: 0,
-      ignore: null, cdx: 0, cdy: 0, ghost: false,
+      ignore: null, cdx: 0, cdy: 0, ghost: false, age: 0, dry: 0,
     };
     l.flipRate = l.baseFlip;
     return l;
@@ -627,7 +634,7 @@ footer a { color: var(--muted); }
       l.x = rnd(0, W - 0.01);
       l.y = BASE;
       const c = ground.col(l.x);
-      if (c >= 0) { land(l, ground, c, true); l.st = 1; }
+      if (c >= 0) { land(l, ground, c, true); l.st = 1; l.age = rnd(0, 38); }
     }
   }
 
@@ -816,6 +823,30 @@ footer a { color: var(--muted); }
     if (ground.count + ledges.reduce((n, s) => n + s.count, 0) === 0) return;
     gusts.push({ start: time, dur: 4.5, strength: 1, dir: sgn(), speed: 620, front: 1300, remove: 1, clearing: true });
     clearUntil = time + 7;
+  }
+
+  // ---------- Crumbling ----------
+  // Like snow melting: leaves that have lain in the pile a while dry out and crumble to flakes.
+  // The page runs it faster than the app, so a visitor sees it within a minute or so.
+  let flakes = [];
+  let crumbleTimer = 0;
+  function crumbleTick(elapsed) {
+    const pace = 0.4 + 2.2 * pileFill();
+    let crumbled = 0;
+    for (const s of [ground, ...ledges]) {
+      if (!s.count) continue;
+      for (const st of s.stacks) for (const l of st) { l.age += elapsed * pace; l.dry = clamp((l.age - 25) / 20, 0, 1); }
+      for (let c = 0; c < s.n && crumbled < 8; c++) {
+        const l = s.stacks[c].find((x) => x.dry >= 1 && x.state === "rest");
+        if (!l) continue;
+        for (let k = 0, n = 4 + ((Math.random() * 4) | 0); k < n; k++) {
+          flakes.push({ x: l.x + rnd(-0.3, 0.3) * l.size, y: l.y + rnd(-0.2, 0.2) * l.size, vx: rnd(-9, 9), vy: rnd(-16, -4),
+            rot: rnd(-3, 3), vr: rnd(-2, 2), t: 0, life: rnd(1.2, 2.2), cell: l.cell,
+            ox: rnd(20, 44), oy: rnd(20, 44), w: rnd(14, 22), size: l.size * rnd(0.18, 0.3) });
+        }
+        detach(l); remove(l); crumbled++;
+      }
+    }
   }
 
   // ---------- Ledges on page elements ----------
@@ -1211,6 +1242,13 @@ footer a { color: var(--muted); }
     }
     drawList.length = alive;
     for (const l of active) if (l.state === "air" || l.state === "carry" || (l.state === "fade" && !l.inDraw)) drawLeaf(l);
+    for (const f of flakes) {
+      ctx.globalAlpha = 1 - f.t / f.life;
+      const c = Math.cos(-f.rot), s = Math.sin(-f.rot);
+      ctx.setTransform(DPR * c, DPR * s, -DPR * s, DPR * c, DPR * f.x, DPR * (H - f.y));
+      ctx.drawImage(sheets[2][1], (f.cell % 6) * CELL + f.ox, ((f.cell / 6) | 0) * CELL + f.oy, f.w, f.w, -f.size / 2, -f.size / 2, f.size, f.size);
+    }
+    ctx.globalAlpha = 1;
     if (puffs.length && puffSprite) {
       for (const p of puffs) {
         const k = p.t / 0.45, sz = 14 * (0.6 + (p.g - 0.6) * k);
@@ -1226,7 +1264,7 @@ footer a { color: var(--muted); }
     let xs = l.xs;
     if (Math.abs(xs) < 0.05) xs = xs < 0 ? -0.05 : 0.05;
     const shade = l.shade + l.depth + (xs < 0 ? 0.2 : 0);
-    const img = sheets[Math.min(3, Math.round(shade / 0.13))];
+    const img = sheets[Math.round(l.dry * 2)][Math.min(3, Math.round(shade / 0.13))];
     const th = -l.angle, c = Math.cos(th), s = Math.sin(th);
     let alpha = l.alpha;
     if (l.state === "fade" && l.fadeDelay <= 0) alpha *= Math.max(0, 1 - l.fadeT);
@@ -1275,6 +1313,10 @@ footer a { color: var(--muted); }
     }
     for (const p of puffs) { p.t += dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 1 - 3 * dt; p.vy *= 1 - 3 * dt; }
     puffs = puffs.filter((p) => p.t < 0.45);
+    crumbleTimer += dt;
+    if (crumbleTimer >= 0.5) { if (S.crumble && S.accumulate) crumbleTick(crumbleTimer); crumbleTimer = 0; }
+    for (const f of flakes) { f.t += dt; f.x += f.vx * dt; f.y += f.vy * dt; f.rot += f.vr * dt; }
+    flakes = flakes.filter((f) => f.t < f.life);
     relax(ground);
     for (const s of ledges) relax(s);
     if (clearUntil !== null && time >= clearUntil) { clearUntil = null; fadeAll(1.2); }
@@ -1301,6 +1343,7 @@ footer a { color: var(--muted); }
     menu.querySelectorAll("[data-toggle]").forEach((b) => b.setAttribute("aria-checked", String(!!S[b.dataset.toggle])));
     menu.querySelectorAll("[data-tool]").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.tool === S.tool)));
     menu.querySelector('[data-toggle="windClears"]').setAttribute("aria-disabled", String(!S.accumulate));
+    menu.querySelector('[data-toggle="crumble"]').setAttribute("aria-disabled", String(!S.accumulate));
     menu.querySelector('[data-toggle="onWindows"]').setAttribute("aria-disabled", String(S.behind));
     document.getElementById("breeze-btn").setAttribute("aria-checked", "false");
     soundBtn.setAttribute("aria-pressed", String(S.sound));

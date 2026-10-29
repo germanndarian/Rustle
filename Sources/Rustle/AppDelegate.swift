@@ -52,6 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(makeItem("Accumulate", #selector(toggleAccumulate), on: prefs.accumulate))
         menu.addItem(makeItem("Wind Blows Leaves Away", #selector(toggleWindClears), on: prefs.windClears,
                               enabled: prefs.accumulate))
+        menu.addItem(makeItem("Leaves Crumble", #selector(toggleCrumble), on: prefs.crumble, enabled: prefs.accumulate))
         menu.addItem(makeItem("Leaves on Windows", #selector(toggleLeavesOnWindows),
                               on: prefs.leavesOnWindows && !prefs.behindWindows, enabled: !prefs.behindWindows))
         menu.addItem(makeItem("Sound", #selector(toggleCrunch), on: prefs.crunchSound))
@@ -119,6 +120,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func toggleAccumulate() {
         prefs.accumulate.toggle()
+        changed()
+    }
+
+    @objc private func toggleCrumble() {
+        prefs.crumble.toggle()
         changed()
     }
 

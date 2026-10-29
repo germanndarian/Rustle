@@ -7,6 +7,7 @@ struct SceneSettings: Equatable {
     var breeze: Breeze = .breezy
     var accumulate = true
     var windClears = true
+    var crumble = true
     var onWindows = true
     var savePower = false
 }
@@ -101,6 +102,9 @@ private final class Leaf {
     var shade: CGFloat = 0
     /// Extra darkening for leaves low in a pile, in the shade of the ones above.
     var depthShade: CGFloat = 0, fromDepthShade: CGFloat = 0
+    /// Time spent lying in a pile (sped up when the pile is deep), and how dried out that has left it, 0...1.
+    var age: CGFloat = 0
+    var dryness: CGFloat = 0
     var alpha: CGFloat = 1
     /// A surface this leaf will not land on again (a full window ledge it rolled off).
     var ignoredSurface: Int?
@@ -243,6 +247,7 @@ final class LeafScene: SKScene {
     private var nextClearingGust: TimeInterval = 70
     private var clearUntil: TimeInterval?
     private var relaxTimer: TimeInterval = 0
+    private var crumbleTimer: TimeInterval = 0
     private var cursorLast: CGPoint?
     private var cursorVelocity = CGVector.zero
 
@@ -348,6 +353,11 @@ final class LeafScene: SKScene {
         liftWithGusts(d)
         stepLeaves(d)
 
+        crumbleTimer += dt
+        if crumbleTimer >= 0.5 {
+            if settings.crumble && settings.accumulate { crumble(elapsed: CGFloat(crumbleTimer)) }
+            crumbleTimer = 0
+        }
         relaxTimer += dt
         if relaxTimer >= 0.08 {
             relaxTimer = 0
@@ -654,8 +664,9 @@ final class LeafScene: SKScene {
         var xs = l.xScale
         if abs(xs) < 0.05 { xs = xs < 0 ? -0.05 : 0.05 }
         l.node.xScale = xs
-        // The underside of a leaf is duller.
-        l.node.colorBlendFactor = min(0.6, l.shade + l.depthShade + (xs < 0 ? 0.22 : 0))
+        // The underside of a leaf is duller, and drying turns it a dull brown.
+        if l.dryness > 0.01 { l.node.color = Self.dryTints[min(Self.dryTints.count - 1, Int(l.dryness * 3 * 7))] }
+        l.node.colorBlendFactor = min(0.75, l.shade + l.depthShade + (xs < 0 ? 0.22 : 0) + l.dryness * 0.55)
     }
 
     private func beginSettle(_ l: Leaf, duration: CGFloat) {
@@ -876,6 +887,68 @@ final class LeafScene: SKScene {
             restZ = CGFloat(resting.count + 1)
         }
         return restZ
+    }
+
+    // MARK: Crumbling
+
+    private static let dryBrown = (r: CGFloat(0.56), g: CGFloat(0.47), b: CGFloat(0.37))
+    /// From the plain black shading tint to dry brown, in steps, so drying never jumps.
+    private static let dryTints: [SKColor] = (0...7).map { i in
+        let t = CGFloat(i) / 7
+        return SKColor(red: dryBrown.r * t, green: dryBrown.g * t, blue: dryBrown.b * t, alpha: 1)
+    }
+    /// Aging (in seconds at the slowest rate) before a resting leaf starts to dry, and how long drying takes.
+    private let dryStart: CGFloat = 90
+    private let dryLength: CGFloat = 60
+    /// RUSTLE_CRUMBLE_FAST ages leaves ten times faster (debugging).
+    private let crumbleBoost: CGFloat = ProcessInfo.processInfo.environment["RUSTLE_CRUMBLE_FAST"] != nil ? 10 : 1
+
+    /// Like snow melting: leaves that have lain in a pile for a while dry out, brown, and crumble to flakes.
+    /// The deeper the pile, the faster they age, so it settles at a pleasant depth.
+    private func crumble(elapsed: CGFloat) {
+        let pace = (0.4 + 2.2 * pileFill) * crumbleBoost
+        var crumbled = 0
+        for s in [ground!] + Array(windowSurfaces.values) where s.count > 0 {
+            for c in 0..<s.columns {
+                for leaf in s.stacks[c] {
+                    leaf.age += elapsed * pace
+                    let dryness = clamp((leaf.age - dryStart) / dryLength, 0, 1)
+                    if dryness != leaf.dryness {
+                        leaf.dryness = dryness
+                        if leaf.state == .resting { render(leaf) }
+                    }
+                }
+            }
+            // The driest leaves give way, a few at a time.
+            for c in 0..<s.columns where crumbled < 8 {
+                guard let leaf = s.stacks[c].first(where: { $0.dryness >= 1 && $0.state == .resting }) else { continue }
+                if s.visible[c] && !leaf.node.isHidden { spawnFlakes(from: leaf) }
+                detach(leaf)
+                remove(leaf)
+                crumbled += 1
+            }
+        }
+    }
+
+    private func spawnFlakes(from leaf: Leaf) {
+        guard let texture = leaf.node.texture else { return }
+        for _ in 0..<Int.random(in: 4...7) {
+            // A small piece of the leaf's own drawing.
+            let w = rnd(0.18, 0.3), h = rnd(0.18, 0.3)
+            let piece = SKTexture(rect: CGRect(x: rnd(0.25, 0.75 - w), y: rnd(0.25, 0.75 - h), width: w, height: h), in: texture)
+            let flake = SKSpriteNode(texture: piece, size: CGSize(width: leaf.size * w, height: leaf.size * h))
+            flake.color = Self.dryTints.last!
+            flake.colorBlendFactor = 0.6
+            flake.position = CGPoint(x: leaf.x + rnd(-0.3, 0.3) * leaf.size, y: leaf.y + rnd(-0.2, 0.2) * leaf.size)
+            flake.zRotation = rnd(-.pi, .pi)
+            flake.zPosition = leaf.node.zPosition + 0.5
+            let duration = TimeInterval(rnd(1.2, 2.2))
+            let drift = SKAction.moveBy(x: rnd(-14, 14), y: -rnd(6, 22), duration: duration)
+            drift.timingMode = .easeOut
+            flake.run(.sequence([.group([drift, .rotate(byAngle: rnd(-2, 2), duration: duration),
+                                         .fadeOut(withDuration: duration)]), .removeFromParent()]))
+            leafLayer.addChild(flake)
+        }
     }
 
     // MARK: Cursor
