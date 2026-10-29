@@ -1,0 +1,1418 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- page:start -->
+<title>Rustle</title>
+<meta name="description" content="Autumn leaves on your Mac's desktop. They pile up, crunch under your cursor, and blow away in the wind.">
+<link rel="icon" href="assets/icon-256.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IM+Fell+English:ital@0;1&family=Hanken+Grotesk:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one column of quiet type over a live canvas; leaves fall over everything and pile along the bottom of the window. */
+:root {
+  --bg: #e2e5de;          /* October fog */
+  --bg-raised: #d5d9cf;
+  --ink: #1b2019;
+  --muted: #565e53;
+  --accent: #a8401b;      /* maple red */
+  --on-accent: #fff7ee;
+  --line: rgba(27, 32, 25, 0.16);
+  --panel: rgba(249, 249, 246, 0.84);
+  --panel-ink: #1c1e1b;
+  --panel-muted: #73776f;
+  --panel-hi: #2f6fdc;
+  --branch: #3a382f;
+  --glow: rgba(255, 255, 250, 0.75);
+  --air: rgba(70, 82, 92, 0.55);
+  --font-display: "IM Fell English", "Iowan Old Style", "Palatino", Georgia, serif;
+  --font-body: "Hanken Grotesk", -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --step--1: 0.875rem;
+  --step-0: 1.0625rem;
+  --step-1: 1.3rem;
+  --step-2: clamp(1.7rem, 3vw, 2.3rem);
+  --step-3: clamp(2.4rem, 5.4vw, 4rem);
+  --step-4: clamp(3.1rem, 8.6vw, 7rem);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111310;
+    --bg-raised: #1a1d18;
+    --ink: #ece6da;
+    --muted: #a29d90;
+    --accent: #eea13c;
+    --on-accent: #1b1308;
+    --line: rgba(236, 230, 218, 0.13);
+    --panel: rgba(42, 41, 37, 0.8);
+    --panel-ink: #f1ede5;
+    --panel-muted: #9b978d;
+    --panel-hi: #3b78e7;
+    --branch: #030403;
+    --glow: rgba(238, 161, 60, 0.11);
+    --air: rgba(255, 255, 255, 0.8);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111310;
+  --bg-raised: #1a1d18;
+  --ink: #ece6da;
+  --muted: #a29d90;
+  --accent: #eea13c;
+  --on-accent: #1b1308;
+  --line: rgba(236, 230, 218, 0.13);
+  --panel: rgba(42, 41, 37, 0.8);
+  --panel-ink: #f1ede5;
+  --panel-muted: #9b978d;
+  --panel-hi: #3b78e7;
+  --branch: #030403;
+  --glow: rgba(238, 161, 60, 0.11);
+  --air: rgba(255, 255, 255, 0.8);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  background-image: radial-gradient(70rem 40rem at 88% -10%, var(--glow), transparent 70%);
+  background-attachment: fixed;
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: var(--step-0);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  overflow-x: hidden;
+}
+#bg, #fx { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+#bg { z-index: 0; }
+#fx { z-index: 30; }
+body.behind #fx { z-index: 1; }
+.wrap { position: relative; z-index: 2; max-width: 72rem; margin: 0 auto; }
+
+a { color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+
+/* Nav */
+.nav { position: relative; z-index: 31; display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding-block: 1.4rem; }
+.brand { display: flex; align-items: center; gap: 0.6rem; text-decoration: none; font-family: var(--font-display); font-size: 1.45rem; }
+.brand img { width: 30px; height: 30px; }
+.nav-links { display: flex; gap: 1.4rem; font-size: var(--step--1); font-weight: 500; }
+.nav-links a { text-decoration: none; color: var(--muted); }
+.nav-links a:hover { color: var(--ink); }
+
+/* Hero */
+.hero { padding-block: clamp(3rem, 9vw, 7.5rem) clamp(4rem, 10vw, 8rem); max-width: 46rem; }
+.eyebrow { font-family: var(--font-mono); font-size: 0.78rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); margin: 0 0 1.4rem; }
+h1, h2, h3 { font-family: var(--font-display); font-weight: 400; text-wrap: balance; margin: 0; }
+h1 { font-size: var(--step-4); line-height: 0.95; letter-spacing: -0.01em; }
+h1 em { font-style: italic; color: var(--accent); }
+.lead { font-size: var(--step-1); line-height: 1.5; color: var(--muted); max-width: 34rem; margin: 1.8rem 0 2.2rem; }
+.actions { display: flex; flex-wrap: wrap; gap: 0.8rem; align-items: center; }
+.button {
+  display: inline-flex; align-items: center; gap: 0.55rem;
+  padding: 0.85rem 1.35rem; border-radius: 999px;
+  font: 600 0.95rem/1 var(--font-body); text-decoration: none;
+  border: 1.5px solid var(--accent); cursor: pointer;
+}
+.button.primary { background: var(--accent); color: var(--on-accent); }
+.button.primary:hover { filter: brightness(1.07); }
+.button.quiet { background: transparent; color: var(--ink); border-color: var(--line); }
+.button.quiet:hover { border-color: var(--ink); }
+.button svg { width: 1.05em; height: 1.05em; }
+.meta { font-family: var(--font-mono); font-size: 0.78rem; color: var(--muted); margin-top: 1.2rem; }
+.hint {
+  position: fixed; z-index: 31; pointer-events: none;
+  right: max(20px, env(safe-area-inset-right, 0px)); bottom: calc(76px + env(safe-area-inset-bottom, 0px));
+  font-family: var(--font-display); font-style: italic; font-size: 1.15rem; color: var(--muted);
+  transition: opacity 1.2s ease;
+}
+.hint.gone { opacity: 0; }
+
+/* Sections */
+section { padding-block: clamp(3.5rem, 8vw, 6.5rem); }
+.section-head { display: grid; gap: 0.9rem; max-width: 40rem; margin-bottom: clamp(2rem, 5vw, 3.4rem); }
+h2 { font-size: var(--step-3); line-height: 1.02; }
+.section-head p { color: var(--muted); margin: 0; font-size: var(--step-1); line-height: 1.5; }
+
+/* The live menu */
+.menu-demo { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: clamp(2rem, 6vw, 5rem); align-items: start; }
+.menu-demo .section-head { margin-bottom: 0; }
+.menu-notes { display: grid; gap: 0.7rem; margin-top: 1.6rem; color: var(--muted); font-size: var(--step--1); }
+.menu-notes kbd { font-family: var(--font-mono); font-size: 0.78rem; border: 1px solid var(--line); border-radius: 5px; padding: 0.05rem 0.4rem; color: var(--ink); }
+.menu {
+  width: 17.5rem; max-width: 100%;
+  background: var(--panel); color: var(--panel-ink);
+  -webkit-backdrop-filter: blur(24px) saturate(1.6); backdrop-filter: blur(24px) saturate(1.6);
+  border: 0.5px solid var(--line); border-radius: 12px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.22), 0 2px 8px rgba(0, 0, 0, 0.12);
+  padding: 5px; font: 400 13.5px/1.25 -apple-system, "SF Pro Text", var(--font-body);
+  position: relative; user-select: none; -webkit-user-select: none;
+}
+.menu-head { padding: 7px 10px 3px; font-size: 11.5px; font-weight: 600; color: var(--panel-muted); }
+.menu-sep { height: 1px; background: var(--line); margin: 5px 10px; }
+.mi {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  padding: 4px 10px 4px 6px; border: 0; border-radius: 6px; background: none;
+  font: inherit; color: inherit; text-align: left; cursor: default;
+}
+.mi:hover, .mi:focus-visible { background: var(--panel-hi); color: #fff; outline: none; }
+.mi .check { width: 14px; flex: none; text-align: center; font-size: 12px; visibility: hidden; }
+.mi[aria-checked="true"] .check { visibility: visible; }
+.mi.indent { padding-left: 16px; }
+.mi .icon { width: 16px; height: 16px; flex: none; opacity: 0.85; }
+.mi .key { margin-left: auto; color: var(--panel-muted); font-size: 12.5px; }
+.mi:hover .key, .mi:hover .chev { color: #fff; }
+.mi .chev { margin-left: auto; color: var(--panel-muted); font-size: 11px; }
+.mi[aria-disabled="true"] { color: var(--panel-muted); }
+.mi[aria-disabled="true"]:hover { background: none; color: var(--panel-muted); }
+.sub { position: relative; }
+.submenu {
+  position: absolute; top: -5px; right: calc(100% - 4px); width: 9.5rem;
+  background: var(--panel); border: 0.5px solid var(--line); border-radius: 10px; padding: 5px;
+  -webkit-backdrop-filter: blur(24px) saturate(1.6); backdrop-filter: blur(24px) saturate(1.6);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.22);
+  display: none; z-index: 3;
+}
+.sub:hover .submenu, .sub:focus-within .submenu, .sub.open .submenu { display: block; }
+
+/* What the leaves do */
+.verbs { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr)); gap: 2.6rem 3.2rem; margin: 0; }
+.verbs > div { display: grid; gap: 0.45rem; min-width: 0; }
+.verbs dt { font-family: var(--font-display); font-style: italic; font-size: var(--step-2); line-height: 1.1; color: var(--accent); }
+.verbs dd { margin: 0; color: var(--muted); max-width: 30rem; }
+
+/* Specimen sheet */
+.specimens { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 20rem), 1fr)); gap: 1.4rem; }
+.specimen {
+  background: var(--bg-raised); border-radius: 4px; padding: 1.4rem 1.4rem 1.2rem;
+  display: grid; gap: 1rem; min-width: 0;
+}
+.specimen .leaves { display: flex; justify-content: space-between; align-items: center; height: 96px; }
+.specimen .leaf { width: 80px; height: 80px; flex: none; background-image: url("assets/leaves-large.png"); background-size: 480px 480px; filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.18)); }
+.specimen .leaf:nth-child(1) { transform: rotate(-14deg); }
+.specimen .leaf:nth-child(2) { transform: rotate(6deg) translateY(-6px); }
+.specimen .leaf:nth-child(3) { transform: rotate(19deg); }
+.label { border-top: 1px solid var(--line); padding-top: 0.85rem; display: grid; gap: 0.15rem; }
+.label h3 { font-size: 1.5rem; line-height: 1.15; }
+.label .latin { font-family: var(--font-display); font-style: italic; color: var(--muted); font-size: 1.05rem; }
+.label .no { font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin-top: 0.35rem; }
+
+/* Download */
+.download { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: clamp(2rem, 6vw, 5rem); align-items: center; }
+.download .icon-big { width: clamp(8rem, 18vw, 12rem); height: auto; filter: drop-shadow(0 20px 40px rgba(0, 0, 0, 0.28)); justify-self: center; }
+.download p { color: var(--muted); max-width: 32rem; margin: 1.2rem 0 1.8rem; font-size: var(--step-1); line-height: 1.5; }
+.build { margin-top: 1.6rem; font-size: var(--step--1); color: var(--muted); }
+.build code { font-family: var(--font-mono); font-size: 0.82rem; color: var(--ink); background: var(--bg-raised); padding: 0.15rem 0.45rem; border-radius: 5px; }
+
+footer { padding-block: 2.5rem 9rem; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 1rem; font-size: var(--step--1); color: var(--muted); border-top: 1px solid var(--line); }
+footer a { color: var(--muted); }
+
+/* Sound toggle and tool layer */
+.nav-right { display: flex; align-items: center; gap: 1.4rem; }
+.sound {
+  display: inline-flex; align-items: center; gap: 0.45rem; padding: 0.45rem 0.8rem; border-radius: 999px;
+  background: transparent; color: var(--ink); border: 1px solid var(--line);
+  font: 500 0.8rem/1 var(--font-body); cursor: pointer;
+}
+.sound:hover { border-color: var(--ink); }
+.sound[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.sound svg { width: 15px; height: 15px; }
+#tool-layer { position: fixed; inset: 0; z-index: 40; cursor: none; touch-action: none; }
+.putaway {
+  position: fixed; z-index: 46; right: max(16px, env(safe-area-inset-right, 0px)); top: calc(16px + env(safe-area-inset-top, 0px));
+  padding: 0.5rem 0.9rem; border-radius: 999px; border: 0.5px solid var(--line);
+  background: var(--panel); color: var(--panel-ink); font: 500 0.8rem/1 var(--font-body); cursor: pointer;
+  -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px);
+}
+.toast {
+  position: fixed; z-index: 45; left: 50%; top: calc(18px + env(safe-area-inset-top, 0px)); transform: translateX(-50%);
+  max-width: calc(100% - 32px); padding: 0.6rem 1rem; border-radius: 10px;
+  background: var(--panel); color: var(--panel-ink); border: 0.5px solid var(--line);
+  -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px);
+  font-size: 0.85rem; text-align: center; transition: opacity 0.6s ease; pointer-events: none;
+}
+.toast.gone { opacity: 0; }
+
+@media (max-width: 760px) {
+  .menu-demo, .download { grid-template-columns: minmax(0, 1fr); }
+  .menu { justify-self: start; }
+  .download .icon-big { justify-self: start; order: -1; }
+  .nav-links a.hide-narrow { display: none; }
+  .submenu { right: auto; left: 30%; top: 100%; }
+  .hint { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+}
+</style>
+<!-- page:head-end -->
+</head>
+<body>
+<!-- page:body -->
+<canvas id="bg" aria-hidden="true"></canvas>
+<canvas id="fx" aria-hidden="true"></canvas>
+
+<div class="wrap">
+  <nav class="nav">
+    <a class="brand" href="#top" id="top"><img src="assets/icon-256.png" alt="" width="30" height="30">Rustle</a>
+    <div class="nav-right">
+      <div class="nav-links">
+        <a href="#leaves" class="hide-narrow">What it does</a>
+        <a href="https://github.com/germanndarian/Rustle" class="hide-narrow">GitHub</a>
+        <a href="#download">Download</a>
+      </div>
+      <button class="sound" id="sound-btn" type="button" aria-pressed="false">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 6h2.2L8 3.2v9.6L4.7 10H2.5z"/><path class="on" d="M10.6 5.6a3.4 3.4 0 0 1 0 4.8M12.4 3.8a6 6 0 0 1 0 8.4"/><path class="off" d="M10.5 6l3.5 4M14 6l-3.5 4"/></svg>
+        <span>Sound off</span>
+      </button>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <p class="eyebrow">Rustle for macOS</p>
+    <h1>Leaves are falling on your <em>desktop.</em></h1>
+    <p class="lead">Maple, oak and ginkgo leaves drift down over your screen, pile up along the bottom and on top of your windows, and crunch when you sweep the cursor through them. Now and then the wind blows them away.</p>
+    <div class="actions">
+      <a class="button primary" href="https://github.com/germanndarian/Rustle/releases/latest/download/Rustle.dmg">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16.4 12.6c0-2.5 2-3.6 2.1-3.7-1.2-1.7-3-1.9-3.6-2-1.5-.2-3 .9-3.7.9-.8 0-2-.9-3.2-.8-1.7 0-3.2 1-4 2.5-1.7 3-.4 7.4 1.2 9.8.8 1.2 1.8 2.5 3 2.4 1.2 0 1.7-.8 3.1-.8 1.5 0 1.9.8 3.2.8 1.3 0 2.1-1.2 2.9-2.4.9-1.3 1.3-2.6 1.3-2.7 0 0-2.4-1-2.3-4zM14 5.2c.7-.8 1.1-1.9 1-3-1 0-2.1.7-2.8 1.5-.6.7-1.2 1.8-1 2.9 1 .1 2.1-.6 2.8-1.4z"/></svg>
+        Download for macOS
+      </a>
+      <a class="button quiet" href="https://github.com/germanndarian/Rustle">Source on GitHub</a>
+    </div>
+    <p class="meta">macOS 14 or later · Apple silicon and Intel · Free</p>
+  </header>
+</div>
+
+<p class="hint" id="hint">Try it: sweep the leaves at the bottom.</p>
+
+<div class="wrap">
+  <section class="menu-demo" aria-labelledby="menu-title">
+    <div>
+      <div class="section-head">
+        <h2 id="menu-title">This menu works.</h2>
+        <p>It's the menu Rustle puts in your menu bar, and it runs the leaves on this page. Try Heavy, turn off Wind Blows Leaves Away and watch the pile grow, or pick up the rake.</p>
+      </div>
+      <div class="menu-notes">
+        <span>With a tool in hand, hold the mouse button to rake or blow. <kbd>Esc</kbd> or a right-click puts it away.</span>
+        <span>Leaves on Windows lets leaves settle on top of this menu, the way they settle on your windows.</span>
+      </div>
+    </div>
+
+    <div class="menu" id="menu" role="menu" aria-label="Rustle menu" data-ledge>
+      <div class="menu-head">Leaf Fall</div>
+      <button class="mi indent" role="menuitemradio" data-fall="off"><span class="check">✓</span>Off</button>
+      <button class="mi indent" role="menuitemradio" data-fall="light"><span class="check">✓</span>Light</button>
+      <button class="mi indent" role="menuitemradio" data-fall="steady"><span class="check">✓</span>Steady</button>
+      <button class="mi indent" role="menuitemradio" data-fall="heavy"><span class="check">✓</span>Heavy</button>
+      <button class="mi indent" role="menuitemradio" data-fall="variable"><span class="check">✓</span>Variable</button>
+      <div class="sub" id="breeze-sub">
+        <button class="mi" role="menuitem" aria-haspopup="true" id="breeze-btn"><span class="check">✓</span>Breeze<span class="chev">▶</span></button>
+        <div class="submenu" role="menu" aria-label="Breeze">
+          <button class="mi" role="menuitemradio" data-breeze="calm"><span class="check">✓</span>Calm</button>
+          <button class="mi" role="menuitemradio" data-breeze="breezy"><span class="check">✓</span>Breezy</button>
+          <button class="mi" role="menuitemradio" data-breeze="gusty"><span class="check">✓</span>Gusty</button>
+        </div>
+      </div>
+      <div class="menu-sep"></div>
+      <button class="mi" role="menuitemcheckbox" data-toggle="accumulate"><span class="check">✓</span>Accumulate</button>
+      <button class="mi" role="menuitemcheckbox" data-toggle="windClears"><span class="check">✓</span>Wind Blows Leaves Away</button>
+      <button class="mi" role="menuitemcheckbox" data-toggle="onWindows"><span class="check">✓</span>Leaves on Windows</button>
+      <button class="mi" role="menuitemcheckbox" data-toggle="sound"><span class="check">✓</span>Sound</button>
+      <button class="mi" role="menuitem" id="clear-btn"><span class="check">✓</span>Clear Leaves</button>
+      <div class="menu-sep"></div>
+      <div class="menu-head">Tools</div>
+      <button class="mi indent" role="menuitemcheckbox" data-tool="rake"><span class="check">✓</span>
+        <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" aria-hidden="true"><path d="M13.5 1.5 8 8.2"/><path d="M8 8.2 2.2 9.4M8 8.2l-4.4 3.3M8 8.2 5.6 13.6M8 8.2l.6 6.3M8 8.2l3 5.4"/></svg>Rake</button>
+      <button class="mi indent" role="menuitemcheckbox" data-tool="blower"><span class="check">✓</span>
+        <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.5" y="6" width="6" height="5" rx="2.2"/><path d="M7.5 8.5h7M3.2 6V4.2h3V6"/></svg>Leaf Blower</button>
+      <div class="menu-sep"></div>
+      <button class="mi" role="menuitemcheckbox" data-toggle="behind"><span class="check">✓</span>Behind Windows</button>
+      <div class="menu-sep"></div>
+      <button class="mi" role="menuitem" id="quit-btn"><span class="check">✓</span>Quit Rustle<span class="key">⌘Q</span></button>
+    </div>
+  </section>
+
+  <section id="leaves" aria-labelledby="leaves-title">
+    <div class="section-head">
+      <h2 id="leaves-title">What the leaves do</h2>
+    </div>
+    <dl class="verbs">
+      <div><dt>Fall</dt><dd>Each leaf swings and rocks on its way down like a real one, and some tumble end over end. Variable lets the leaf fall pick up and ease off over the day.</dd></div>
+      <div><dt>Pile up</dt><dd>They gather along the bottom of the screen and slump to a natural slope. They settle on any window with room above it, too.</dd></div>
+      <div><dt>Crunch</dt><dd>Sweep the cursor through the pile and the leaves fly up with a dry crunch. The sound is made live from thousands of tiny crackles, so it never repeats.</dd></div>
+      <div><dt>Blow away</dt><dd>Every so often a gust sweeps across and carries part of the pile off the screen, more often when the pile is deep. Turn it off and the leaves stay.</dd></div>
+      <div><dt>Rake</dt><dd>Pick up the rake, hold the mouse button and drag. Leaves catch in the tines and come along until you let go, so you can rake them into heaps.</dd></div>
+      <div><dt>Blow</dt><dd>The leaf blower lifts leaves off the pile and pushes them wherever it points, with a soft electric whoosh. Scroll to aim the nozzle.</dd></div>
+      <div><dt>Slide off</dt><dd>Drag a window and its leaves slide off with it. Close or minimize it and they drop. Switch Spaces and they come back with the window.</dd></div>
+      <div><dt>Stay out of the way</dt><dd>Clicks go straight through the leaves. Screenshots and screen sharing show your desktop without them, unless you turn on Show in Screenshots.</dd></div>
+      <div><dt>Rest</dt><dd>About 4% of one processor core and 55 MB of memory while leaves fall, and about 1% once they've settled. It pauses while your screen sleeps or locks.</dd></div>
+    </dl>
+  </section>
+
+  <section aria-labelledby="specimens-title">
+    <div class="section-head">
+      <h2 id="specimens-title">Six kinds of leaf</h2>
+      <p>Every leaf in Rustle is drawn in code, 36 of them in all, from golden ginkgo to wine-dark sweetgum. These are the ones that fall on your desktop.</p>
+    </div>
+    <div class="specimens">
+      <article class="specimen">
+        <div class="leaves"><span class="leaf" data-cell="3"></span><span class="leaf" data-cell="0"></span><span class="leaf" data-cell="11"></span></div>
+        <div class="label"><h3>Maples</h3><span class="latin">Acer saccharum, A. rubrum, A. palmatum</span><span class="no">Drawings 1–13 · sugar, red and Japanese</span></div>
+      </article>
+      <article class="specimen">
+        <div class="leaves"><span class="leaf" data-cell="13"></span><span class="leaf" data-cell="17"></span><span class="leaf" data-cell="15"></span></div>
+        <div class="label"><h3>Oaks</h3><span class="latin">Quercus robur, Q. alba</span><span class="no">Drawings 14–18 · English and white oak</span></div>
+      </article>
+      <article class="specimen">
+        <div class="leaves"><span class="leaf" data-cell="18"></span><span class="leaf" data-cell="20"></span><span class="leaf" data-cell="21"></span></div>
+        <div class="label"><h3>Birch and aspen</h3><span class="latin">Betula pendula, Populus tremula</span><span class="no">Drawings 19–23 · double-serrated edges</span></div>
+      </article>
+      <article class="specimen">
+        <div class="leaves"><span class="leaf" data-cell="23"></span><span class="leaf" data-cell="25"></span><span class="leaf" data-cell="24"></span></div>
+        <div class="label"><h3>Beech and elm</h3><span class="latin">Fagus sylvatica, Ulmus minor</span><span class="no">Drawings 24–27 · parallel side veins</span></div>
+      </article>
+      <article class="specimen">
+        <div class="leaves"><span class="leaf" data-cell="27"></span><span class="leaf" data-cell="29"></span><span class="leaf" data-cell="30"></span></div>
+        <div class="label"><h3>Ginkgo</h3><span class="latin">Ginkgo biloba</span><span class="no">Drawings 28–31 · notched fans</span></div>
+      </article>
+      <article class="specimen">
+        <div class="leaves"><span class="leaf" data-cell="32"></span><span class="leaf" data-cell="31"></span><span class="leaf" data-cell="35"></span></div>
+        <div class="label"><h3>Sweetgum</h3><span class="latin">Liquidambar styraciflua</span><span class="no">Drawings 32–36 · five-pointed stars</span></div>
+      </article>
+    </div>
+  </section>
+
+  <section id="download" class="download" aria-labelledby="download-title">
+    <div>
+      <h2 id="download-title">Let the leaves in.</h2>
+      <p>Rustle is a small native app for macOS 14 or later. Open it once and it lives in your menu bar. It isn't notarized yet, so the first time, right-click it and choose Open.</p>
+      <div class="actions">
+        <a class="button primary" href="https://github.com/germanndarian/Rustle/releases/latest/download/Rustle.dmg">Download for macOS</a>
+        <a class="button quiet" href="https://github.com/germanndarian/Rustle">Source on GitHub</a>
+      </div>
+      <p class="build">Or build it yourself: <code>./build.sh --install</code></p>
+    </div>
+    <img class="icon-big" src="assets/icon-256.png" alt="The Rustle app icon: a maple leaf on a dusk-colored tile" width="256" height="256">
+  </section>
+
+  <footer>
+    <span>Rustle 1.0 for macOS</span>
+    <a href="https://github.com/germanndarian/Rustle">github.com/germanndarian/Rustle</a>
+  </footer>
+</div>
+
+<div id="tool-layer" hidden></div>
+<button class="putaway" id="putaway" type="button" hidden>Put it away</button>
+<div class="toast gone" id="toast" role="status"></div>
+
+<script>
+(() => {
+  "use strict";
+  const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const fx = document.getElementById("fx");
+  const ctx = fx.getContext("2d");
+  const bg = document.getElementById("bg");
+  const bctx = bg.getContext("2d");
+  let W = 0, H = 0, DPR = 1;
+
+  // ---------- Art ----------
+  const CELL = 80;
+  const COVER = [.82,.83,.83,.84,.81,.83,.85,.81,.83,.82,.80,.82,.79,.62,.63,.70,.72,.64,.67,.67,.70,.72,.68,.65,.65,.68,.69,.70,.71,.74,.72,.83,.83,.79,.79,.80];
+  const sheet = new Image();
+  const sheets = [];             // the sheet at four depths of shade
+  const rakeImg = new Image();
+  const blowerImg = new Image();
+  const TOOL = {
+    rake: { img: rakeImg, w: 98, h: 128, hx: 40, hy: 119 },
+    blower: { img: blowerImg, w: 148, h: 70, hx: 140, hy: 45 },
+  };
+  let puffSprite = null;
+
+  function buildSheets() {
+    sheets.length = 0;
+    for (const dark of [0, 0.13, 0.26, 0.38]) {
+      const c = document.createElement("canvas");
+      c.width = sheet.naturalWidth; c.height = sheet.naturalHeight;
+      const g = c.getContext("2d");
+      g.drawImage(sheet, 0, 0);
+      if (dark > 0) {
+        g.globalCompositeOperation = "source-atop";
+        g.fillStyle = `rgba(12, 8, 4, ${dark})`;
+        g.fillRect(0, 0, c.width, c.height);
+      }
+      sheets.push(c);
+    }
+  }
+  function buildPuff() {
+    const c = document.createElement("canvas");
+    c.width = c.height = 32;
+    const g = c.getContext("2d");
+    const air = getComputedStyle(document.documentElement).getPropertyValue("--air").trim() || "rgba(255,255,255,.8)";
+    const grad = g.createRadialGradient(16, 16, 0, 16, 16, 16);
+    grad.addColorStop(0, air);
+    grad.addColorStop(1, "rgba(0,0,0,0)");
+    g.fillStyle = grad;
+    g.fillRect(0, 0, 32, 32);
+    puffSprite = c;
+  }
+
+  // ---------- Helpers ----------
+  const rnd = (a, b) => a + Math.random() * (b - a);
+  const chance = (p) => Math.random() < p;
+  const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+  const sgn = () => (Math.random() < 0.5 ? -1 : 1);
+  const smooth = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+  const NV = Float32Array.from({ length: 256 }, () => Math.random());
+  const noise = (t) => { const f = Math.floor(t), i = f & 255, u = t - f; const s = u * u * (3 - 2 * u); return NV[i] + (NV[(i + 1) & 255] - NV[i]) * s; };
+  function closest(ax, ay, bx, by, px, py) {
+    const abx = bx - ax, aby = by - ay, l2 = abx * abx + aby * aby;
+    if (l2 < 1e-4) return [ax, ay];
+    const t = clamp(((px - ax) * abx + (py - ay) * aby) / l2, 0, 1);
+    return [ax + abx * t, ay + aby * t];
+  }
+
+  // ---------- Settings ----------
+  const S = { fall: "steady", breeze: "breezy", accumulate: true, windClears: true, onWindows: true, sound: false, behind: false, tool: "none" };
+  const tool = { pressed: false, facing: 1, angle: 0.55, drift: 0 };
+
+  // ---------- Model ----------
+  // Coordinates are y-up from the bottom of the window, like the app.
+  class Surface {
+    constructor(minX, maxX, baseY, maxH, spills, el) {
+      const n = Math.max(1, Math.floor((maxX - minX) / 10));
+      this.minX = minX; this.colW = (maxX - minX) / n; this.baseY = baseY; this.maxH = maxH;
+      this.spills = spills; this.el = el; this.width = maxX - minX;
+      this.stacks = Array.from({ length: n }, () => []);
+      this.h = new Float32Array(n);
+      this.dirty = new Set();
+      this.count = 0;
+    }
+    get n() { return this.h.length; }
+    get maxX() { return this.minX + this.n * this.colW; }
+    col(x) { const c = Math.floor((x - this.minX) / this.colW); return c >= 0 && c < this.n ? c : -1; }
+    cx(c) { return this.minX + (c + 0.5) * this.colW; }
+    top(c) { return this.baseY + this.h[c]; }
+    nb(k) { if (k < 0 || k >= this.n) return this.spills ? 0 : null; return this.h[k]; }
+    markAround(c) { for (let k = c - 1; k <= c + 1; k++) if (k >= 0 && k < this.n) this.dirty.add(k); }
+  }
+
+  let ground = null;
+  let ledges = [];              // surfaces on [data-ledge] elements
+  let active = [];
+  let drawList = [];
+  let carried = [];
+  let puffs = [];
+  let gusts = [];
+  let time = 0, spawnCarry = 0, zc = 0;
+  let nextBreeze = 10, nextClearing = 45;
+  let clearUntil = null;
+  let breezeAmp = 20;
+  const BASE = 22;
+  const MAX_STEP = 6;
+
+  function makeLeaf() {
+    const cell = (Math.random() * 36) | 0;
+    const size = BASE * rnd(0.75, 1.35) * (W < 600 ? 0.85 : 1);
+    const tumbler = chance(0.3);
+    const l = {
+      cell, size, radius: size * COVER[cell] * 0.5, contact: size * COVER[cell] * 0.22,
+      state: "air", isActive: false, inDraw: false,
+      x: 0, y: 0, vx: 0, vy: 0, angle: rnd(-Math.PI, Math.PI), spin: 0,
+      flip: rnd(0, 6.28), baseFlip: (tumbler ? rnd(2.5, 6) : rnd(0.7, 1.8)) * sgn(), flipRate: 0, xs: 1, tumbler,
+      swayPhase: rnd(0, 6.28), swayFreq: rnd(1.1, 2.3), swayAmp: rnd(18, 50), tilt: rnd(0.3, 0.8),
+      fall: rnd(46, 86), drag: rnd(1.8, 2.8), catchW: rnd(0.8, 1.1), shade: rnd(0, 0.12), depth: 0, alpha: 1,
+      surface: null, column: -1, thick: 4, rx: 0, ry: 0, ra: 0, rxs: 1, relY: 0,
+      st: 0, sd: 0.3, fx: 0, fy: 0, fa: 0, fxs: 1, fdepth: 0, ephemeral: false, fadeDelay: 0, fadeT: 0,
+      ignore: null, cdx: 0, cdy: 0, ghost: false,
+    };
+    l.flipRate = l.baseFlip;
+    return l;
+  }
+  function activate(l) { if (!l.isActive) { l.isActive = true; active.push(l); } }
+  function remove(l) { if (l.surface) detach(l); l.state = "gone"; }
+
+  // ---------- Wind ----------
+  const baseWind = (x) => breezeAmp * ((noise(time * 0.02) * 2 - 1) + 0.35 * (noise(x / 650 + time * 0.09 + 40) * 2 - 1));
+  function gustFactor(g, x) {
+    const e = time - g.start;
+    if (e < 0 || e > g.dur + 2) return 0;
+    const travel = e * g.front;
+    const behind = g.dir > 0 ? travel - 300 - x : x - (W + 300 - travel);
+    if (behind <= 0) return 0;
+    const env = e < g.dur ? 1 : 1 - (e - g.dur) / 2;
+    return g.strength * smooth(0, 280, behind) * env * (0.8 + 0.4 * noise(x / 260 + e * 1.7 + 13));
+  }
+  function windAt(x) {
+    let wx = baseWind(x), wy = 0;
+    for (const g of gusts) {
+      const f = gustFactor(g, x);
+      if (f > 0) { wx += g.dir * g.speed * f; wy += f * (g.remove > 0 ? 120 : 45) * (noise(x / 380 + time * 0.8 + 91) - 0.3); }
+    }
+    return [wx, wy];
+  }
+  const clearingActive = () => gusts.some((g) => g.clearing);
+  const pileFill = () => ground.count / Math.max(1, ground.n * ground.maxH / 4.2);
+
+  function scheduleGusts() {
+    gusts = gusts.filter((g) => time <= g.start + g.dur + 2);
+    if (S.breeze !== "calm" && time >= nextBreeze) {
+      const gusty = S.breeze === "gusty";
+      const prevailing = baseWind(W / 2) >= 0 ? 1 : -1;
+      gusts.push({ start: time, dur: rnd(2.5, 5.5), strength: rnd(0.45, 1), dir: chance(0.75) ? prevailing : -prevailing,
+        speed: gusty ? 200 : 120, front: rnd(600, 900), remove: 0, clearing: false });
+      nextBreeze = time + (gusty ? rnd(10, 28) : rnd(22, 55));
+    }
+    if (S.windClears && S.accumulate && time >= nextClearing) {
+      const fill = pileFill();
+      if (fill > 0.03) {
+        gusts.push({ start: time, dur: rnd(4, 7), strength: 0.8 + 0.2 * fill, dir: sgn(), speed: rnd(420, 560),
+          front: rnd(800, 1100), remove: 0.12 + 0.45 * fill, clearing: false });
+      }
+      nextClearing = time + rnd(40, 90) * (1.25 - 0.75 * fill);
+    }
+  }
+  function liftWithGusts(dt) {
+    for (const g of gusts) {
+      if (g.remove <= 0) continue;
+      for (const s of [ground, ...ledges]) {
+        if (!s.count) continue;
+        for (let c = 0; c < s.n; c++) {
+          const n = s.stacks[c].length;
+          if (!n) continue;
+          const f = gustFactor(g, s.cx(c));
+          if (f <= 0.15) continue;
+          const rate = g.clearing ? Math.max(n / 1.2, 5) : g.remove * n / g.dur;
+          if (chance(rate * f * dt)) {
+            const l = s.stacks[c][n - 1];
+            detach(l);
+            l.vx = g.dir * rnd(90, 280) * f;
+            l.vy = rnd(40, 190) * f + 20;
+            launch(l, f);
+          }
+        }
+      }
+    }
+  }
+
+  // ---------- Spawning ----------
+  function spawnRate() {
+    const per = { off: 0, light: 0.45, steady: 1.2, heavy: 3.0 }[S.fall] ?? (0.15 + 2.8 * Math.pow(noise(time / 140 + 7), 1.6));
+    return per * W / 1000;
+  }
+  function spawnLeaf(prewarm) {
+    if (active.length > 700) return;
+    const l = makeLeaf();
+    const drift = baseWind(W / 2) * (H / (l.fall * 0.8)) * 0.8;
+    l.x = rnd(-0.04, 1.04) * W - drift;
+    l.y = prewarm ? rnd(0.15, 1) * H : H + l.size;
+    l.vx = baseWind(l.x);
+    l.vy = -l.fall * 0.8;
+    if (prewarm) l.alpha = 0;
+    activate(l);
+  }
+  function prewarm() {
+    const n = Math.min(160, Math.round(spawnRate() * H / 55 * 0.75));
+    for (let i = 0; i < n; i++) spawnLeaf(true);
+  }
+  function prefill(count) {
+    for (let i = 0; i < count; i++) {
+      const l = makeLeaf();
+      l.x = rnd(0, W - 0.01);
+      l.y = BASE;
+      const c = ground.col(l.x);
+      if (c >= 0) { land(l, ground, c, true); l.st = 1; }
+    }
+  }
+
+  // ---------- Motion ----------
+  function stepAir(l, dt) {
+    const [wx, wy] = windAt(l.x);
+    l.swayPhase += l.swayFreq * dt;
+    const c = Math.cos(l.swayPhase);
+    const k = 1 - Math.exp(-l.drag * dt);
+    l.vx += (wx * l.catchW + l.swayAmp * c - l.vx) * k;
+    l.vy += (-l.fall * (0.35 + 0.9 * c * c) + wy - l.vy) * k;
+    const prevBottom = l.y - l.contact;
+    l.x += l.vx * dt;
+    l.y += l.vy * dt;
+    l.spin += (l.tilt * l.swayFreq * c - l.spin) * (1 - Math.exp(-2.5 * dt));
+    l.angle += l.spin * dt;
+    l.flipRate += (l.baseFlip - l.flipRate) * (1 - Math.exp(-1.5 * dt));
+    l.flip += l.flipRate * dt;
+    const wobble = 0.8 + 0.2 * Math.cos(l.flip);
+    const tumble = l.tumbler ? 1 : smooth(1.5, 4, Math.abs(l.flipRate));
+    l.xs = wobble + (Math.cos(l.flip) - wobble) * tumble;
+    if (l.ghost) {
+      l.alpha -= dt * 0.9;
+      if (l.alpha <= 0) { remove(l); return; }
+    } else if (l.alpha < 1) l.alpha = Math.min(1, l.alpha + dt * 1.5);
+    if (l.depth > 0.001) l.depth *= Math.exp(-4 * dt);
+
+    if (l.vy < 0 && !l.ghost) {
+      const bottom = l.y - l.contact;
+      if (S.onWindows && !S.behind) {
+        for (const s of ledges) {
+          if (s === l.ignore || l.x < s.minX || l.x >= s.maxX) continue;
+          const col = s.col(l.x);
+          if (col < 0) continue;
+          const top = s.top(col);
+          if (prevBottom >= top - 0.5 && bottom <= top) { land(l, s, col); return; }
+        }
+      }
+      const col = ground.col(l.x);
+      if (col >= 0 && bottom <= ground.top(col)) { land(l, ground, col); return; }
+    }
+    if (l.y < -60 || l.x < -180 || l.x > W + 180 || l.y > H + 400) remove(l);
+  }
+  function stepSettle(l, dt) {
+    l.st = Math.min(1, l.st + dt / l.sd);
+    const e = 1 - Math.pow(1 - l.st, 3);
+    l.x = l.fx + (l.rx - l.fx) * e;
+    l.y = l.fy + (l.ry - l.fy) * e;
+    l.angle = l.fa + (l.ra - l.fa) * e;
+    l.xs = l.fxs + (l.rxs - l.fxs) * e;
+    const target = l.surface ? 0.26 * (1 - smooth(0, 30, l.ry - l.surface.baseY)) : 0;
+    l.depth = l.fdepth + (target - l.fdepth) * e;
+    if (l.alpha < 1) l.alpha = Math.min(1, l.alpha + dt * 1.5);
+    if (l.st >= 1) {
+      if (l.ephemeral) { l.state = "fade"; l.fadeT = 0; } else l.state = "rest";
+    }
+  }
+  function stepFade(l, dt) {
+    if (l.fadeDelay > 0) { l.fadeDelay -= dt; return; }
+    l.fadeT += dt / 1.2;
+    if (l.fadeT >= 1) remove(l);
+  }
+  function stepCarry(l, dt) {
+    const tx = rakeHead[0] + tool.facing * l.cdx, ty = rakeHead[1] + l.cdy;
+    const k = 1 - Math.exp(-16 * dt);
+    const nx = l.x + (tx - l.x) * k, ny = l.y + (ty - l.y) * k;
+    l.vx = (nx - l.x) / dt; l.vy = (ny - l.y) / dt;
+    l.x = nx; l.y = ny;
+    l.angle -= clamp(l.vx * 0.004, -3, 3) * dt;
+    l.xs += ((l.xs < 0 ? -0.6 : 0.6) - l.xs) * k * 0.3;
+    if (l.depth > 0.001) l.depth *= Math.exp(-4 * dt);
+  }
+  function beginSettle(l, dur) {
+    l.fx = l.x; l.fy = l.y; l.fa = l.angle; l.fxs = l.xs; l.fdepth = l.depth;
+    l.st = 0; l.sd = Math.max(0.05, dur); l.state = "settle";
+    if (!l.inDraw) { l.inDraw = true; drawList.push(l); }
+    activate(l);
+  }
+  function launch(l, strength) {
+    l.spin = rnd(-9, 9) * strength;
+    l.flipRate = sgn() * rnd(5, 12) * strength;
+    l.swayPhase = rnd(0, 6.28);
+    l.state = "air"; l.ephemeral = false; l.ignore = null;
+    activate(l);
+  }
+
+  // ---------- Piles ----------
+  function restPose(l) {
+    const sign = l.xs < 0 ? -1 : 1;
+    let a, xs;
+    if (chance(0.8)) { a = (Math.sin(l.angle) >= 0 ? Math.PI / 2 : -Math.PI / 2) + rnd(-0.5, 0.5); xs = sign * rnd(0.32, 0.7); }
+    else { a = l.angle + rnd(-0.6, 0.6); xs = sign * rnd(0.65, 1); }
+    let d = (a - l.angle) % (2 * Math.PI);
+    if (d > Math.PI) d -= 2 * Math.PI; else if (d < -Math.PI) d += 2 * Math.PI;
+    a = l.angle + d;
+    const hl = l.radius, hw = hl * 0.78 * Math.abs(xs);
+    const he = Math.hypot(hl * Math.cos(a), hw * Math.sin(a));
+    return { a, xs, he, thick: clamp(he * 0.8, 3, 6.5) };
+  }
+  function land(l, s, column, quiet) {
+    const w = windAt(l.x)[0];
+    if (!quiet && (clearingActive() || (S.windClears && S.accumulate && Math.abs(w) > 170))) {
+      l.vy = rnd(30, 120); l.vx = w * rnd(0.4, 0.8); l.flipRate = sgn() * rnd(4, 9);
+      return;
+    }
+    const p = restPose(l);
+    let c = column, slid = false;
+    for (let i = 0; i < 12; i++) {
+      const here = s.h[c] + p.thick;
+      let best = c, low = here;
+      for (const k of [c - 1, c + 1]) { const h = s.nb(k); if (h !== null && h < low) { low = h; best = k; } }
+      if (best === c || here - low <= MAX_STEP * 1.3) break;
+      if (best < 0 || best >= s.n) { l.ignore = s; l.vx = (best < 0 ? -1 : 1) * rnd(40, 90); l.vy = rnd(10, 40); return; }
+      c = best; slid = true;
+    }
+    const rx = slid ? s.cx(c) + rnd(-0.45, 0.45) * s.colW : l.x;
+    if (!S.accumulate && !quiet) {
+      l.ephemeral = true; l.rx = rx; l.ry = s.top(c) + p.he * 0.7; l.ra = p.a; l.rxs = p.xs;
+      l.fadeDelay = rnd(1.2, 3);
+      beginSettle(l, 0.35);
+      return;
+    }
+    if (s.h[c] + p.thick > s.maxH) {
+      if (s === ground) compact(s, c, p.thick);
+      else { l.ignore = s; l.vx = (s.cx(c) < s.minX + s.width / 2 ? -1 : 1) * rnd(40, 90); l.vy = rnd(10, 40); return; }
+    }
+    l.surface = s; l.column = c; l.thick = p.thick;
+    l.rx = rx; l.ry = s.top(c) + p.he * 0.7 + rnd(-1, 1); l.ra = p.a; l.rxs = p.xs;
+    s.stacks[c].push(l); s.h[c] += p.thick; s.count++; s.dirty.add(c);
+    beginSettle(l, slid ? 0.5 : rnd(0.25, 0.4));
+  }
+  function detach(l) {
+    const s = l.surface, c = l.column;
+    l.surface = null; l.column = -1;
+    if (!s || c < 0) return;
+    const st = s.stacks[c], i = st.indexOf(l);
+    if (i < 0) return;
+    st.splice(i, 1);
+    s.h[c] = Math.max(0, s.h[c] - l.thick);
+    s.count--;
+    s.markAround(c);
+    for (let j = i; j < st.length; j++) { st[j].ry -= l.thick; beginSettle(st[j], 0.18); }
+  }
+  function compact(s, c, need) {
+    let removed = 0;
+    const st = s.stacks[c];
+    while (s.h[c] - removed + need > s.maxH && st.length) {
+      const b = st.shift();
+      removed += b.thick; s.count--; b.surface = null; remove(b);
+    }
+    if (!removed) return;
+    s.h[c] = Math.max(0, s.h[c] - removed);
+    s.markAround(c);
+    for (const l of st) { l.ry -= removed; beginSettle(l, 0.6); }
+  }
+  function relax(s) {
+    if (!s.dirty.size) return;
+    const cols = [...s.dirty];
+    s.dirty.clear();
+    let moves = 0;
+    for (const c of cols) {
+      if (c < 0 || c >= s.n) continue;
+      if (moves >= 10) { s.dirty.add(c); continue; }
+      const st = s.stacks[c];
+      if (!st.length) continue;
+      let target = 0, low = s.h[c];
+      for (const k of [c - 1, c + 1]) { const h = s.nb(k); if (h !== null && h < low) { low = h; target = k - c; } }
+      if (!target || s.h[c] - low <= MAX_STEP * 1.3) continue;
+      const top = st[st.length - 1];
+      detach(top);
+      top.vx = target * rnd(35, 80); top.vy = rnd(10, 35);
+      launch(top, 0.25);
+      moves++;
+    }
+  }
+  function fadeAll(stagger) {
+    for (const s of [ground, ...ledges]) {
+      for (let c = 0; c < s.n; c++) {
+        for (const l of s.stacks[c]) { l.surface = null; l.column = -1; l.state = "fade"; l.fadeT = 0; l.fadeDelay = rnd(0, stagger); activate(l); }
+        s.stacks[c] = []; s.h[c] = 0;
+      }
+      s.count = 0; s.dirty.clear();
+    }
+  }
+  function clearAll() {
+    if (ground.count + ledges.reduce((n, s) => n + s.count, 0) === 0) return;
+    gusts.push({ start: time, dur: 4.5, strength: 1, dir: sgn(), speed: 620, front: 1300, remove: 1, clearing: true });
+    clearUntil = time + 7;
+  }
+
+  // ---------- Ledges on page elements ----------
+  const ledgeEls = [...document.querySelectorAll("[data-ledge]")];
+  function syncLedges() {
+    const want = S.onWindows && !S.behind;
+    ledgeEls.forEach((el, i) => {
+      let s = ledges.find((x) => x.el === el);
+      if (!want) { if (s) dropLedge(s); return; }
+      const r = el.getBoundingClientRect();
+      const minX = r.left + 10, maxX = r.right - 10, baseY = H - r.top;
+      if (!s || Math.abs(s.width - (maxX - minX)) > 0.5) {
+        if (s) dropLedge(s);
+        s = new Surface(minX, maxX, baseY, 16, true, el);
+        ledges.push(s);
+        return;
+      }
+      const dx = minX - s.minX, dy = baseY - s.baseY;
+      if (dx || dy) {
+        s.minX = minX; s.baseY = baseY;
+        for (const st of s.stacks) for (const l of st) { l.x += dx; l.y += dy; l.rx += dx; l.ry += dy; l.fx += dx; l.fy += dy; }
+      }
+    });
+  }
+  function dropLedge(s) {
+    for (let c = 0; c < s.n; c++) {
+      for (const l of s.stacks[c]) { l.surface = null; l.column = -1; l.vx = rnd(-25, 25); l.vy = rnd(-5, 30); launch(l, 0.4); }
+      s.stacks[c] = []; s.h[c] = 0;
+    }
+    s.count = 0;
+    ledges = ledges.filter((x) => x !== s);
+  }
+
+  // ---------- Pointer ----------
+  const pointer = { x: -1e4, y: -1e4, present: false, moved: false };
+  let last = null;
+  const vel = [0, 0];
+  let rakeHead = [0, 0];
+  let puffCarry = 0;
+  let interacted = false;
+  const hint = document.getElementById("hint");
+
+  addEventListener("pointermove", (e) => {
+    const dxMove = pointer.present ? e.clientX - pointer.x : 0;
+    pointer.x = e.clientX; pointer.y = H - e.clientY; pointer.present = true;
+    if (S.tool !== "none") {
+      tool.drift = tool.drift * 0.85 + dxMove;
+      if (tool.drift * tool.facing < -14) { tool.facing = -tool.facing; tool.drift = 0; }
+    }
+  }, { passive: true });
+  addEventListener("pointerdown", (e) => {
+    pointer.x = e.clientX; pointer.y = H - e.clientY; pointer.present = true;
+    // On touch screens a tap near the pile tosses a handful of leaves.
+    if (e.pointerType !== "mouse" && S.tool === "none") tossAt(pointer.x, pointer.y);
+  }, { passive: true });
+  document.addEventListener("pointerleave", () => { pointer.present = false; last = null; });
+
+  function tossAt(x, y) {
+    const hits = [];
+    gather(ground, x - 40, x + 40, y - 50, y + 50, hits);
+    for (const l of hits.slice(0, 18)) {
+      detach(l);
+      l.vx = rnd(-160, 160); l.vy = rnd(160, 380);
+      launch(l, 1);
+    }
+    if (hits.length) { crunch(0.6, x / W * 2 - 1); noteInteraction(); }
+  }
+  function noteInteraction() {
+    if (interacted) return;
+    interacted = true;
+    hint.classList.add("gone");
+  }
+
+  function handlePointer(dt) {
+    if (!pointer.present) { if (carried.length) releaseCarried(); last = null; return; }
+    const p = [pointer.x, pointer.y];
+    if (S.tool !== "rake" && carried.length) releaseCarried();
+    if (!last) { last = p; return; }
+    const dx = p[0] - last[0], dy = p[1] - last[1];
+    const prev = last;
+    last = p;
+    if (Math.abs(dx) > 600 || Math.abs(dy) > 600) { vel[0] = vel[1] = 0; return; }
+    const b = 1 - Math.exp(-dt * 30);
+    vel[0] += (dx / dt - vel[0]) * b;
+    vel[1] += (dy / dt - vel[1]) * b;
+    if (S.tool === "rake") rake(prev, p);
+    else if (S.tool === "blower") blow(p, dt);
+    else if (dx || dy) kick(prev, p);
+  }
+
+  function gather(s, minX, maxX, minY, maxY, out) {
+    if (!s.count || maxY < s.baseY - 10 || minY > s.baseY + s.maxH + 20) return;
+    const c0 = s.col(Math.max(minX, s.minX)), c1 = s.col(Math.min(maxX, s.maxX - 0.01));
+    if (c0 < 0 || c1 < 0) return;
+    for (let c = c0; c <= c1; c++) {
+      const st = s.stacks[c];
+      for (let i = st.length - 1; i >= 0; i--) {
+        const l = st[i];
+        if (l.y < minY) break;
+        if (l.y <= maxY) out.push(l);
+      }
+    }
+  }
+
+  function kick(a, b) {
+    const speed = Math.hypot(vel[0], vel[1]);
+    if (speed < 30) return;
+    if (speed > 60) {
+      for (const l of active) {
+        if (l.state !== "air") continue;
+        const ddx = l.x - b[0], ddy = l.y - b[1], d2 = ddx * ddx + ddy * ddy;
+        if (d2 > 6400) continue;
+        const f = 1 - Math.sqrt(d2) / 80;
+        l.vx += vel[0] * 0.12 * f; l.vy += vel[1] * 0.12 * f; l.spin += rnd(-3, 3) * f;
+      }
+    }
+    const R = 14 + Math.min(speed * 0.012, 14);
+    const cand = [];
+    const minX = Math.min(a[0], b[0]) - R - 16, maxX = Math.max(a[0], b[0]) + R + 16;
+    const minY = Math.min(a[1], b[1]) - R - 20, maxY = Math.max(a[1], b[1]) + R + 20;
+    for (const s of S.onWindows && !S.behind ? [ground, ...ledges] : [ground]) gather(s, minX, maxX, minY, maxY, cand);
+    const hits = cand.filter((l) => { const q = closest(a[0], a[1], b[0], b[1], l.x, l.y); return Math.hypot(l.x - q[0], l.y - q[1]) < R + l.radius * 0.55; });
+    if (!hits.length) return;
+    const max = Math.min(hits.length, 3 + ((speed / 70) | 0), 28);
+    hits.sort((p, q) => q.y - p.y);
+    const st = clamp(speed / 700, 0.3, 1.6);
+    for (const l of hits.slice(0, max)) {
+      detach(l);
+      const q = closest(a[0], a[1], b[0], b[1], l.x, l.y);
+      let nx = l.x - q[0], ny = l.y - q[1];
+      const len = Math.hypot(nx, ny);
+      if (len > 0.01) { nx /= len; ny /= len; } else { nx = 0; ny = 1; }
+      l.vx = vel[0] * rnd(0.25, 0.6) + nx * rnd(40, 140) * st;
+      l.vy = Math.max(0, vel[1]) * rnd(0.2, 0.45) + rnd(70, 240) * st + Math.max(0, ny) * 60 * st;
+      const v = Math.hypot(l.vx, l.vy);
+      if (v > 1300) { l.vx *= 1300 / v; l.vy *= 1300 / v; }
+      launch(l, st);
+    }
+    crunch(clamp(0.08 + max / 12 * 0.6 + speed / 2200 * 0.4, 0, 1), clamp(b[0] / W * 2 - 1, -1, 1));
+    noteInteraction();
+  }
+
+  function supportTop(p) {
+    let best = null;
+    const c = ground.col(p[0]);
+    if (c >= 0) best = ground.top(c);
+    for (const s of S.onWindows && !S.behind ? ledges : []) {
+      const k = s.col(p[0]);
+      if (k < 0) continue;
+      const t = s.top(k);
+      if (t <= p[1] + 10 && (best === null || t > best)) best = t;
+    }
+    return best !== null && p[1] - best < 28 ? best : null;
+  }
+  function rake(a, b) {
+    rakeHead = b;
+    if (!tool.pressed || supportTop(b) === null) { if (carried.length) releaseCarried(); return; }
+    const speed = Math.hypot(vel[0], vel[1]);
+    if (speed > 12) {
+      const hits = [];
+      const minX = Math.min(a[0], b[0]) - 30, maxX = Math.max(a[0], b[0]) + 30;
+      const minY = Math.min(a[1], b[1]) - 20, maxY = Math.max(a[1], b[1]) + 14;
+      for (const s of S.onWindows && !S.behind ? [ground, ...ledges] : [ground]) gather(s, minX, maxX, minY, maxY, hits);
+      hits.sort((p, q) => q.y - p.y);
+      for (const l of hits.slice(0, 8)) {
+        detach(l);
+        if (carried.length < 36) {
+          l.state = "carry"; l.ephemeral = false;
+          l.cdx = rnd(-4, 26); l.cdy = rnd(-3, 12) + carried.length * 0.4;
+          carried.push(l); activate(l);
+        } else {
+          l.vx = vel[0] * rnd(0.6, 1); l.vy = rnd(30, 90);
+          launch(l, 0.4);
+        }
+      }
+      if (hits.length) noteInteraction();
+    }
+    if (carried.length && speed > 8) rakeSound(clamp(carried.length / 36 * 0.6 + speed / 1500 * 0.4, 0, 1), clamp(b[0] / W * 2 - 1, -1, 1));
+  }
+  function releaseCarried() {
+    for (const l of carried) {
+      if (l.state !== "carry") continue;
+      l.vx = clamp(l.vx * 0.4, -300, 300) + rnd(-15, 15);
+      l.vy = rnd(-10, 25);
+      l.ignore = null; l.state = "air";
+    }
+    carried = [];
+  }
+
+  function blow(p, dt) {
+    const pan = clamp(p[0] / W * 2 - 1, -1, 1);
+    blowerSound(tool.pressed ? 1 : 0, pan);
+    if (!tool.pressed) return;
+    const a = tool.angle, dir = [tool.facing * Math.cos(a), -Math.sin(a)], L = 380;
+    puffCarry += 36 * dt;
+    while (puffCarry >= 1) {
+      puffCarry -= 1;
+      const s0 = rnd(4, 24), side = rnd(-5, 5), spread = rnd(-0.22, 0.22), sp = rnd(170, 260) / 0.45;
+      puffs.push({ x: p[0] + dir[0] * s0 - dir[1] * side, y: p[1] + dir[1] * s0 + dir[0] * side,
+        vx: (dir[0] - dir[1] * spread) * sp, vy: (dir[1] + dir[0] * spread) * sp, t: 0, a: rnd(0.1, 0.2), g: rnd(1.6, 2.4) });
+    }
+    let impact = null;
+    if (dir[1] < -0.05) {
+      const gc = ground.col(p[0]);
+      const gy = gc >= 0 ? ground.top(gc) : 0;
+      const along = (p[1] - gy) / -dir[1];
+      if (along > 0 && along < L) impact = [p[0] + dir[0] * along, gy, 1 - along / L];
+    }
+    const strength = (qx, qy) => {
+      const rx = qx - p[0], ry = qy - p[1];
+      let s = 0;
+      const along = rx * dir[0] + ry * dir[1];
+      if (along > -8 && along < L) {
+        const perp = Math.abs(rx * dir[1] - ry * dir[0]), width = 16 + Math.max(0, along) * 0.32;
+        if (perp < width) s = (1 - Math.max(0, along) / L) * Math.sqrt(1 - perp / width);
+      }
+      if (impact) {
+        const ahead = (qx - impact[0]) * tool.facing;
+        if (ahead > -30 && ahead < 260 && qy - impact[1] < 30) s = Math.max(s, impact[2] * 0.8 * (1 - Math.max(0, ahead) / 260));
+      }
+      return s;
+    };
+    for (const l of active) {
+      if (l.state !== "air") continue;
+      const s = strength(l.x, l.y);
+      if (s <= 0) continue;
+      l.vx += dir[0] * 2600 * s * dt;
+      l.vy += (dir[1] * 2600 + 900) * s * dt;
+      l.spin += rnd(-40, 40) * s * dt;
+      l.flipRate += sgn() * 30 * s * dt;
+    }
+    let lifted = 0;
+    const end = [p[0] + dir[0] * L, p[1] + dir[1] * L], reach = 16 + L * 0.32;
+    let minX = Math.min(p[0], end[0]) - reach, maxX = Math.max(p[0], end[0]) + reach;
+    if (impact) { minX = Math.min(minX, impact[0] - 260); maxX = Math.max(maxX, impact[0] + 260); }
+    for (const s of S.onWindows && !S.behind ? [ground, ...ledges] : [ground]) {
+      if (!s.count) continue;
+      const c0 = s.col(Math.max(minX, s.minX)), c1 = s.col(Math.min(maxX, s.maxX - 0.01));
+      if (c0 < 0 || c1 < 0) continue;
+      const cand = [];
+      for (let c = c0; c <= c1; c++) {
+        const st = s.stacks[c];
+        for (let i = Math.max(0, st.length - 3); i < st.length; i++) {
+          const l = st[i], k = strength(l.x, l.y);
+          if (k > 0.02 && chance(16 * k * dt)) cand.push([l, k]);
+        }
+      }
+      for (const [l, k] of cand.slice(0, 30)) {
+        detach(l);
+        l.vx = dir[0] * rnd(250, 520) * k + tool.facing * rnd(120, 300) * k;
+        l.vy = rnd(70, 230) * k + 20;
+        launch(l, k + 0.3);
+        lifted++;
+      }
+    }
+    if (lifted) { crunch(Math.min(0.55, 0.14 + lifted * 0.05), pan); noteInteraction(); }
+  }
+
+  // ---------- Sound ----------
+  // A live stream of tiny resonant fracture clicks, like the app: random timing, power-law loudness, nothing on a grid.
+  let ac = null, master = null, clickBufs = [], lastCrunch = 0, crunchCarry = 0, swishGain = null, airGain = null, whine = null, whineGain = null, airFilter = null;
+  function audioInit() {
+    if (ac) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    ac = new AC();
+    const comp = ac.createDynamicsCompressor();
+    comp.threshold.value = -20; comp.ratio.value = 4; comp.attack.value = 0.003; comp.release.value = 0.12;
+    master = ac.createGain(); master.gain.value = 0.9;
+    master.connect(comp).connect(ac.destination);
+    for (let i = 0; i < 24; i++) {
+      const n = Math.round(ac.sampleRate * rnd(0.0006, 0.004));
+      const buf = ac.createBuffer(1, n, ac.sampleRate), d = buf.getChannelData(0);
+      const decay = n / rnd(2, 5);
+      for (let j = 0; j < n; j++) d[j] = (Math.random() * 2 - 1) * Math.exp(-j / decay);
+      clickBufs.push(buf);
+    }
+    const len = ac.sampleRate * 2, nb = ac.createBuffer(1, len, ac.sampleRate), nd = nb.getChannelData(0);
+    let b0 = 0, b1 = 0, b2 = 0;
+    for (let j = 0; j < len; j++) {   // soft pink-ish noise for air and swish
+      const w = Math.random() * 2 - 1;
+      b0 = 0.99765 * b0 + w * 0.099; b1 = 0.963 * b1 + w * 0.2965; b2 = 0.57 * b2 + w * 1.0527;
+      nd[j] = (b0 + b1 + b2 + w * 0.1848) * 0.12;
+    }
+    const loop = (filterType, freq, q) => {
+      const src = ac.createBufferSource(); src.buffer = nb; src.loop = true; src.loopStart = 0; src.loopEnd = 2;
+      const f = ac.createBiquadFilter(); f.type = filterType; f.frequency.value = freq; f.Q.value = q;
+      const g = ac.createGain(); g.gain.value = 0;
+      src.connect(f).connect(g).connect(master); src.start(ac.currentTime + Math.random());
+      return [g, f];
+    };
+    [swishGain] = loop("bandpass", 3200, 0.8);
+    [airGain, airFilter] = loop("bandpass", 1300, 0.45);
+    whine = ac.createOscillator(); whine.type = "sine"; whine.frequency.value = 480;
+    whineGain = ac.createGain(); whineGain.gain.value = 0;
+    whine.connect(whineGain).connect(master); whine.start();
+  }
+  function clicks(count, spread, level, pan, lo, hi) {
+    const t0 = ac.currentTime + 0.004;
+    let t = t0;
+    for (let i = 0; i < count; i++) {
+      // Bursty: most gaps short, a few long.
+      t += -Math.log(1 - Math.random()) * spread / count * (chance(0.25) ? 3 : 0.6);
+      const src = ac.createBufferSource(); src.buffer = clickBufs[(Math.random() * clickBufs.length) | 0];
+      const f = ac.createBiquadFilter(); f.type = "bandpass"; f.frequency.value = rnd(lo, hi); f.Q.value = rnd(1.5, 7);
+      const g = ac.createGain(); g.gain.value = level * Math.pow(Math.random(), 2.6) * 2.2;
+      const p = ac.createStereoPanner(); p.pan.value = clamp(pan + rnd(-0.25, 0.25), -1, 1);
+      src.connect(f).connect(g).connect(p).connect(master);
+      src.start(t);
+    }
+  }
+  function crunch(intensity, pan) {
+    if (!S.sound || !ac) return;
+    const now = ac.currentTime;
+    crunchCarry = Math.max(crunchCarry, intensity);
+    if (now - lastCrunch < 0.03 + rnd(0, 0.03)) return;
+    const level = clamp(crunchCarry, 0.1, 1);
+    crunchCarry = 0; lastCrunch = now;
+    clicks(Math.round((4 + 24 * level) * rnd(0.6, 1.4)), 0.05 + 0.12 * level, 0.25 + 0.55 * level, pan, 1400, 9000);
+    if (chance(0.3 * level)) clicks(1, 0.01, 0.9 * level, pan, 800, 1600);
+  }
+  let lastRake = 0;
+  function rakeSound(intensity, pan) {
+    if (!S.sound || !ac) return;
+    const now = ac.currentTime;
+    if (now - lastRake < 0.04) return;
+    lastRake = now;
+    swishGain.gain.cancelScheduledValues(now);
+    swishGain.gain.setTargetAtTime(0.5 * intensity, now, 0.05);
+    swishGain.gain.setTargetAtTime(0, now + 0.12, 0.08);
+    clicks(Math.round(6 + 14 * intensity), 0.07, 0.12 + 0.25 * intensity, pan, 2000, 7000);
+  }
+  let blowerOn = false, lastFlutter = 0;
+  function blowerSound(level, pan) {
+    if (!ac) return;
+    const on = S.sound && level > 0;
+    const now = ac.currentTime;
+    if (on === blowerOn && (!on || now - lastFlutter < 0.15)) return;
+    blowerOn = on; lastFlutter = now;
+    airGain.gain.setTargetAtTime(on ? 0.55 : 0, now, on ? 0.09 : 0.25);
+    airFilter.frequency.setTargetAtTime(on ? 1100 + 500 * noise(time * 0.7) : 700, now, 0.2);
+    whineGain.gain.setTargetAtTime(on ? 0.012 : 0, now, on ? 0.12 : 0.3);
+    whine.frequency.setTargetAtTime(on ? 820 : 480, now, on ? 0.18 : 0.4);
+  }
+
+  // ---------- Branch backdrop ----------
+  function drawBranch() {
+    bctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    bctx.clearRect(0, 0, W, H);
+    if (W < 520) return;
+    const color = getComputedStyle(document.documentElement).getPropertyValue("--branch").trim();
+    bctx.strokeStyle = color; bctx.fillStyle = color; bctx.lineCap = "round";
+    let seed = 7;
+    const r = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+    const limb = (x, y, ang, len, w, depth) => {
+      const x2 = x + Math.cos(ang) * len, y2 = y + Math.sin(ang) * len;
+      const mx = (x + x2) / 2 + (r() - 0.5) * len * 0.25, my = (y + y2) / 2 + (r() - 0.5) * len * 0.2;
+      bctx.lineWidth = w;
+      bctx.beginPath(); bctx.moveTo(x, y); bctx.quadraticCurveTo(mx, my, x2, y2); bctx.stroke();
+      if (depth <= 0 || w < 0.8) return;
+      const kids = 2 + (r() < 0.35 ? 1 : 0);
+      for (let i = 0; i < kids; i++) limb(x2, y2, ang + (r() - 0.5) * 1.3 + 0.12, len * (0.62 + r() * 0.18), w * 0.66, depth - 1);
+    };
+    limb(W + 10, 92, Math.PI + 0.32, Math.min(W * 0.2, 260), 9, 6);
+  }
+
+  // ---------- Frame ----------
+  function resize() {
+    const oldW = W;
+    DPR = Math.min(2, window.devicePixelRatio || 1);
+    W = innerWidth; H = innerHeight;
+    for (const c of [fx, bg]) { c.width = Math.round(W * DPR); c.height = Math.round(H * DPR); }
+    if (!ground || Math.abs(oldW - W) > 1) {
+      const keep = ground ? ground.count : 0;
+      for (const l of drawList) l.state = "gone";
+      drawList = []; active = []; carried = [];
+      ground = new Surface(0, W, 0, clamp(H * 0.065, 34, 60), false, null);
+      prefill(keep || Math.round(ground.n * 3.4));
+      if (!reduceMotion) prewarm();
+    }
+    drawBranch();
+  }
+
+  function render() {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, fx.width, fx.height);
+    if (!sheets.length) return;
+    let alive = 0;
+    for (let i = 0; i < drawList.length; i++) {
+      const l = drawList[i];
+      if (l.state === "settle" || l.state === "rest" || l.state === "fade") { drawList[alive++] = l; drawLeaf(l); }
+      else l.inDraw = false;
+    }
+    drawList.length = alive;
+    for (const l of active) if (l.state === "air" || l.state === "carry" || (l.state === "fade" && !l.inDraw)) drawLeaf(l);
+    if (puffs.length && puffSprite) {
+      for (const p of puffs) {
+        const k = p.t / 0.45, sz = 14 * (0.6 + (p.g - 0.6) * k);
+        ctx.globalAlpha = p.a * (1 - k);
+        ctx.setTransform(DPR, 0, 0, DPR, DPR * p.x, DPR * (H - p.y));
+        ctx.drawImage(puffSprite, -sz / 2, -sz / 2, sz, sz);
+      }
+      ctx.globalAlpha = 1;
+    }
+    if (S.tool !== "none" && pointer.present) drawTool();
+  }
+  function drawLeaf(l) {
+    let xs = l.xs;
+    if (Math.abs(xs) < 0.05) xs = xs < 0 ? -0.05 : 0.05;
+    const shade = l.shade + l.depth + (xs < 0 ? 0.2 : 0);
+    const img = sheets[Math.min(3, Math.round(shade / 0.13))];
+    const th = -l.angle, c = Math.cos(th), s = Math.sin(th);
+    let alpha = l.alpha;
+    if (l.state === "fade" && l.fadeDelay <= 0) alpha *= Math.max(0, 1 - l.fadeT);
+    ctx.globalAlpha = alpha;
+    ctx.setTransform(DPR * c * xs, DPR * s * xs, -DPR * s, DPR * c, DPR * l.x, DPR * (H - l.y));
+    const sx = (l.cell % 6) * CELL, sy = ((l.cell / 6) | 0) * CELL, z = l.size;
+    ctx.drawImage(img, sx, sy, CELL, CELL, -z / 2, -z / 2, z, z);
+    ctx.globalAlpha = 1;
+  }
+  function drawTool() {
+    const t = TOOL[S.tool];
+    if (!t.img.complete) return;
+    ctx.setTransform(DPR, 0, 0, DPR, DPR * pointer.x, DPR * (H - pointer.y));
+    if (S.tool === "blower") {
+      ctx.scale(tool.facing, 1);
+      ctx.rotate(tool.angle);
+      if (tool.pressed) ctx.translate(rnd(-0.6, 0.6), rnd(-0.6, 0.6));
+    } else {
+      ctx.scale(-tool.facing, 1);
+      if (tool.pressed) ctx.rotate(-0.12);
+    }
+    ctx.drawImage(t.img, -t.hx, -t.hy, t.w, t.h);
+  }
+
+  let lastT = 0;
+  function frame(ts) {
+    const raw = lastT ? (ts - lastT) / 1000 : 1 / 60;
+    lastT = ts;
+    if (raw > 0.25) last = null;
+    const dt = clamp(raw, 0.0005, 1 / 20);
+    time += dt;
+    syncLedges();
+    scheduleGusts();
+    spawnCarry += spawnRate() * dt;
+    while (spawnCarry >= 1) { spawnCarry -= 1; spawnLeaf(false); }
+    handlePointer(dt);
+    liftWithGusts(dt);
+    for (let i = 0; i < active.length;) {
+      const l = active[i];
+      if (l.state === "air") stepAir(l, dt);
+      else if (l.state === "settle") stepSettle(l, dt);
+      else if (l.state === "fade") stepFade(l, dt);
+      else if (l.state === "carry") stepCarry(l, dt);
+      if (l.state === "rest" || l.state === "gone") { l.isActive = false; active[i] = active[active.length - 1]; active.pop(); }
+      else i++;
+    }
+    for (const p of puffs) { p.t += dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 1 - 3 * dt; p.vy *= 1 - 3 * dt; }
+    puffs = puffs.filter((p) => p.t < 0.45);
+    relax(ground);
+    for (const s of ledges) relax(s);
+    if (clearUntil !== null && time >= clearUntil) { clearUntil = null; fadeAll(1.2); }
+    render();
+    requestAnimationFrame(frame);
+  }
+
+  // ---------- Menu ----------
+  const menu = document.getElementById("menu");
+  const soundBtn = document.getElementById("sound-btn");
+  const layer = document.getElementById("tool-layer");
+  const toast = document.getElementById("toast");
+  const putaway = document.getElementById("putaway");
+  let toastTimer = 0;
+  function showToast(text) {
+    toast.textContent = text;
+    toast.classList.remove("gone");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toast.classList.add("gone"), 3800);
+  }
+  function refreshMenu() {
+    menu.querySelectorAll("[data-fall]").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.fall === S.fall)));
+    menu.querySelectorAll("[data-breeze]").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.breeze === S.breeze)));
+    menu.querySelectorAll("[data-toggle]").forEach((b) => b.setAttribute("aria-checked", String(!!S[b.dataset.toggle])));
+    menu.querySelectorAll("[data-tool]").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.tool === S.tool)));
+    menu.querySelector('[data-toggle="windClears"]').setAttribute("aria-disabled", String(!S.accumulate));
+    menu.querySelector('[data-toggle="onWindows"]').setAttribute("aria-disabled", String(S.behind));
+    document.getElementById("breeze-btn").setAttribute("aria-checked", "false");
+    soundBtn.setAttribute("aria-pressed", String(S.sound));
+    soundBtn.querySelector("span").textContent = S.sound ? "Sound on" : "Sound off";
+    soundBtn.querySelector(".on").style.display = S.sound ? "" : "none";
+    soundBtn.querySelector(".off").style.display = S.sound ? "none" : "";
+    document.body.classList.toggle("behind", S.behind);
+  }
+  function setSound(on) {
+    S.sound = on;
+    if (on) { audioInit(); ac && ac.resume && ac.resume(); }
+    if (!on && ac) blowerSound(0, 0);
+    refreshMenu();
+  }
+  function equip(name) {
+    S.tool = S.tool === name ? "none" : name;
+    tool.pressed = false;
+    putaway.hidden = S.tool === "none";
+    if (S.tool === "none") { layer.hidden = true; releaseCarried(); if (ac) blowerSound(0, 0); toast.classList.add("gone"); }
+    else {
+      layer.hidden = false;
+      putaway.textContent = S.tool === "rake" ? "Put the rake away" : "Put the blower away";
+      showToast(S.tool === "rake"
+        ? "Rake: hold the mouse button and drag through the leaves. Esc puts it away."
+        : "Leaf blower: hold the mouse button to blow, scroll to aim. Esc puts it away.");
+    }
+    refreshMenu();
+  }
+  menu.addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b || b.getAttribute("aria-disabled") === "true") return;
+    if (b.dataset.fall) {
+      const wasOff = S.fall === "off";
+      S.fall = b.dataset.fall;
+      if (wasOff && S.fall !== "off") prewarm();
+    } else if (b.dataset.breeze) {
+      S.breeze = b.dataset.breeze;
+      breezeAmp = { calm: 7, breezy: 20, gusty: 34 }[S.breeze];
+      document.getElementById("breeze-sub").classList.remove("open");
+    } else if (b.id === "breeze-btn") {
+      document.getElementById("breeze-sub").classList.toggle("open");
+      return;
+    } else if (b.dataset.toggle === "sound") {
+      setSound(!S.sound);
+      return;
+    } else if (b.dataset.toggle) {
+      const k = b.dataset.toggle;
+      S[k] = !S[k];
+      if (k === "accumulate" && !S.accumulate) fadeAll(2.5);
+      if (k === "windClears" && S.windClears) nextClearing = time + rnd(12, 25);
+      if (k === "onWindows" || k === "behind") syncLedges();
+    } else if (b.dataset.tool) {
+      equip(b.dataset.tool);
+      return;
+    } else if (b.id === "clear-btn") {
+      clearAll();
+    } else if (b.id === "quit-btn") {
+      S.fall = "off";
+      if (S.tool !== "none") equip(S.tool);
+      fadeAll(1.5);
+      for (const l of active) if (l.state === "air") l.ghost = true;
+      showToast("Rustle quit. Pick a Leaf Fall setting to bring the leaves back.");
+    }
+    refreshMenu();
+  });
+  soundBtn.addEventListener("click", () => setSound(!S.sound));
+  putaway.addEventListener("click", () => { if (S.tool !== "none") equip(S.tool); });
+
+  layer.addEventListener("pointerdown", (e) => {
+    if (e.button === 2) return;
+    pointer.x = e.clientX; pointer.y = H - e.clientY; pointer.present = true;
+    tool.pressed = true;
+    layer.setPointerCapture(e.pointerId);
+  });
+  const lift = () => { tool.pressed = false; };
+  layer.addEventListener("pointerup", lift);
+  layer.addEventListener("pointercancel", lift);
+  layer.addEventListener("contextmenu", (e) => { e.preventDefault(); if (S.tool !== "none") equip(S.tool); });
+  layer.addEventListener("wheel", (e) => {
+    if (S.tool !== "blower") return;
+    e.preventDefault();
+    tool.angle = clamp(tool.angle + e.deltaY * 0.0025, 0, 1.2);
+  }, { passive: false });
+  addEventListener("keydown", (e) => { if (e.key === "Escape" && S.tool !== "none") equip(S.tool); });
+  addEventListener("resize", resize);
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { drawBranch(); buildPuff(); });
+  new MutationObserver(() => { drawBranch(); buildPuff(); }).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+
+  // Specimen cells
+  document.querySelectorAll(".specimen .leaf").forEach((el) => {
+    const i = +el.dataset.cell;
+    el.style.backgroundPosition = `${-(i % 6) * 80}px ${-((i / 6) | 0) * 80}px`;
+  });
+
+  // ---------- Start ----------
+  if (reduceMotion) { S.fall = "off"; S.breeze = "calm"; S.windClears = false; breezeAmp = 0; }
+  refreshMenu();
+  sheet.onload = () => {
+    buildSheets();
+    buildPuff();
+    resize();
+    if (reduceMotion) {
+      // A still scene: the pile, settled, and nothing moving until someone reaches for it.
+      for (const l of active) if (l.state === "settle") l.st = 1;
+    }
+    requestAnimationFrame(frame);
+  };
+  sheet.src = "assets/leaves.png";
+  rakeImg.src = "assets/rake.png";
+  blowerImg.src = "assets/blower.png";
+})();
+</script>
+<!-- page:end -->
+</body>
+</html>
