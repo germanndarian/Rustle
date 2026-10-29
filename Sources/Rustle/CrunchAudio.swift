@@ -1,44 +1,45 @@
 import Foundation
 import AVFoundation
 
-/// Plays the sound of dry leaves being disturbed by the cursor.
-/// Called from the main thread, up to once per frame (60 Hz); it rate-limits and layers internally.
+/// The sounds of the leaf pile: dry leaves crackling under the cursor, a rake dragging leaves,
+/// and a soft electric leaf blower.
 ///
-/// Everything is synthesized in code: a bank of crunch variants (clusters of tiny band-passed fibre
-/// snaps over a soft low "crush" layer) is rendered once in the background. Playback is a small pool of
-/// `AVAudioPlayerNode`s feeding the main mixer. The engine starts on the first crunch and pauses after
-/// a few quiet seconds, so the audio hardware sleeps while nobody touches the leaves.
+/// Everything is synthesized live in one `AVAudioSourceNode`, nothing is pre-rendered, so nothing
+/// ever repeats. Leaves are modelled the way crackling materials behave physically: a stream of tiny
+/// fracture clicks, each a few samples of excitation ringing a small random resonator, with a
+/// power-law amplitude distribution (many faint ticks, a few crisp snaps) and bursty, self-exciting
+/// timing whose rate follows how hard the leaves are being disturbed. There is no clock or grid
+/// anywhere, so no putt-putt pulsing.
 ///
-/// Threading: `crunch` only runs the cheap trigger logic on the main thread. Everything that touches
-/// AVAudioEngine (building, starting, pausing, scheduling) happens on a private serial queue, because
-/// those calls can block for 10-150 ms and would otherwise stall the leaf animation.
+/// Threading: the public methods are called on the main thread and only write a few numbers into a
+/// lock-protected mailbox (well under a microsecond). The render thread picks them up with a
+/// try-lock, so it never waits. Engine work (build, start, pause) runs on a private serial queue,
+/// because it can block for 10-150 ms. The engine starts on the first sound and pauses after
+/// a few silent seconds, so the audio hardware sleeps while nobody touches the leaves.
 final class CrunchAudio {
-    /// When false, `crunch` is a no-op and the audio engine is stopped.
+    /// When false, `crunch`, `rake` and `blower` are no-ops and the audio engine is stopped.
     var isEnabled: Bool = true {
         didSet {
             guard oldValue != isEnabled else { return }
             let enabled = isEnabled
+            if !enabled { controls.silence() }
             audioQueue.async { [weak self] in self?.setEnabled(enabled) }
         }
     }
 
-    // Main thread.
-    private var logic: CrunchTriggerLogic?  // nil until the bank is synthesized
+    private let controls = CrunchControls()
+    private var lastWake = -Double.infinity  // main thread
 
     // Audio queue only.
     private let audioQueue = DispatchQueue(label: "Rustle.CrunchAudio", qos: .userInteractive)
     private var enabled = true
-    private var buffers: [AVAudioPCMBuffer] = []
     private var engine: AVAudioEngine?
-    private var players: [AVAudioPlayerNode] = []
     private var configObserver: NSObjectProtocol?
     private var retryAfter: Double = 0
-    private var soundEndsAt: Double = 0
     private var idleCheckPending = false
 
     init() {
-        audioQueue.async { [weak self] in self?.loadBank() }
-        // Pre-build the graph (no audio I/O yet) so the first crunch only pays for start().
+        // Pre-build the graph (no audio I/O yet) so the first sound only pays for start().
         // Delayed a little so an app that turns the sound off at launch never builds it.
         audioQueue.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self = self, self.enabled, self.engine == nil else { return }
@@ -61,97 +62,115 @@ final class CrunchAudio {
             DispatchQueue.main.async { [weak self] in self?.crunch(intensity: intensity, pan: pan) }
             return
         }
-        guard let logic = logic else { return }  // bank still being synthesized (first moments after launch)
+        let level = Self.unitValue(intensity)
+        guard level > 0.005 else { return }
         let now = ProcessInfo.processInfo.systemUptime
-        guard let trigger = logic.process(time: now, intensity: intensity, pan: pan) else { return }
-        audioQueue.async { [weak self] in self?.play(trigger, requestedAt: now) }
+        controls.crunch(level, pan: Self.panValue(pan), at: now)
+        wake(now)
+    }
+
+    /// A rake dragging leaves. Call every frame while the rake moves leaves.
+    /// - Parameters:
+    ///   - intensity: 0...1, roughly how many leaves are being dragged times how fast. 0 (or no
+    ///     calls) when the rake isn't moving leaves; the sound then settles within ~150 ms.
+    ///   - pan: -1 (left) ... 1 (right).
+    func rake(intensity: Float, pan: Float) {
+        guard isEnabled else { return }
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.rake(intensity: intensity, pan: pan) }
+            return
+        }
+        let level = Self.unitValue(intensity)
+        guard level > 0.005 else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        controls.rake(level, pan: Self.panValue(pan), at: now)
+        wake(now)
+    }
+
+    /// A handheld electric leaf blower. Call every frame while the blower is equipped.
+    /// - Parameters:
+    ///   - level: 1 while the trigger is held, 0 when released (values in between work too).
+    ///     It spins up over ~0.3 s and down over ~0.7 s.
+    ///   - pan: -1 (left) ... 1 (right).
+    func blower(level: Float, pan: Float) {
+        guard isEnabled else { return }
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.blower(level: level, pan: pan) }
+            return
+        }
+        let value = Self.unitValue(level)
+        let now = ProcessInfo.processInfo.systemUptime
+        controls.blower(value, pan: Self.panValue(pan), at: now)
+        if value > 0 { wake(now) }
+    }
+
+    private static func unitValue(_ x: Float) -> Float { x.isFinite ? min(max(x, 0), 1) : 0 }
+    private static func panValue(_ x: Float) -> Float { x.isFinite ? min(max(x, -1), 1) : 0 }
+
+    /// Asks the audio queue to make sure the engine runs (at most every 0.1 s while sound is wanted).
+    private func wake(_ now: Double) {
+        guard now - lastWake > CrunchTuning.wakeInterval else { return }
+        lastWake = now
+        audioQueue.async { [weak self] in self?.ensureRunning() }
     }
 
     // MARK: Audio queue
 
-    private func loadBank() {
-        guard let format = CrunchTuning.bufferFormat else { return }
-        let bank = CrunchSynth.makeBank(seed: CrunchTuning.bankSeed)
-        let preroll = CrunchTuning.prerollFrames
-        var made: [AVAudioPCMBuffer] = []
-        for variant in bank {
-            let frames = AVAudioFrameCount(preroll + variant.samples.count)
-            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames),
-                  let channel = buffer.floatChannelData?[0] else { return }
-            buffer.frameLength = frames
-            channel.initialize(repeating: 0, count: preroll)
-            variant.samples.withUnsafeBufferPointer { src in
-                (channel + preroll).update(from: src.baseAddress!, count: src.count)
-            }
-            made.append(buffer)
-        }
-        buffers = made
-        let logic = CrunchTriggerLogic(bank: bank, voices: CrunchTuning.voiceCount,
-                                       seed: UInt64.random(in: 1...UInt64.max))
-        DispatchQueue.main.async { [weak self] in self?.logic = logic }
-    }
-
     private func setEnabled(_ value: Bool) {
         enabled = value
-        if !value { tearDownEngine() }
-    }
-
-    private func play(_ trigger: CrunchTrigger, requestedAt time: Double) {
-        guard enabled, trigger.variant < buffers.count else { return }
-        guard let engine = runningEngine() else { return }
-        // A trigger that waited behind a slow engine start is dropped rather than bunched up late.
-        let now = ProcessInfo.processInfo.systemUptime
-        guard now - time < 0.15, trigger.voice < players.count else { return }
-        let player = players[trigger.voice]
-        if !player.isPlaying {
-            guard engine.isRunning else { return }  // play() on a stopped engine raises
-            player.play()  // players start lazily: each play() blocks ~10 ms
+        if !value {
+            tearDownEngine()
+        } else if engine == nil {
+            buildEngine()
         }
-        // The mixer ramps volume/pan changes over ~13 ms; each buffer starts with that much silence,
-        // so the ramp has settled before the first snap.
-        player.volume = trigger.volume
-        player.pan = trigger.pan
-        player.scheduleBuffer(buffers[trigger.variant], at: nil, options: [], completionHandler: nil)
-        soundEndsAt = max(soundEndsAt, now + trigger.duration)
-        scheduleIdleCheck(after: CrunchTuning.idleTimeout + trigger.duration)
     }
 
     /// Builds (if needed) and starts the engine. Fails silently, with a back-off, when there is no usable output.
-    private func runningEngine() -> AVAudioEngine? {
-        if let engine = engine, engine.isRunning { return engine }
+    private func ensureRunning() {
+        guard enabled else { return }
         let now = ProcessInfo.processInfo.systemUptime
-        guard now >= retryAfter else { return nil }
-        if engine == nil { buildEngine() }
-        guard let engine = engine else {
-            retryAfter = now + CrunchTuning.retryDelay
-            return nil
+        if engine?.isRunning != true {
+            guard now >= retryAfter else { return }
+            if engine == nil { buildEngine() }
+            guard let engine = engine else {
+                retryAfter = now + CrunchTuning.retryDelay
+                return
+            }
+            do {
+                try engine.start()
+            } catch {
+                tearDownEngine()
+                retryAfter = now + CrunchTuning.retryDelay
+                return
+            }
         }
-        do {
-            try engine.start()
-        } catch {
-            tearDownEngine()
-            retryAfter = now + CrunchTuning.retryDelay
-            return nil
-        }
-        return engine.isRunning ? engine : nil
+        scheduleIdleCheck(after: CrunchTuning.idleTimeout + CrunchTuning.tail)
     }
 
     private func buildEngine() {
-        guard let format = CrunchTuning.bufferFormat else { return }
         let engine = AVAudioEngine()
         // Never touch inputNode (that would ask for the microphone). Check the output first:
         // connecting to an output with no channels / no sample rate raises an exception.
         let output = engine.outputNode.outputFormat(forBus: 0)
-        guard output.sampleRate > 0, output.channelCount > 0 else { return }
-        let mixer = engine.mainMixerNode
-        var made: [AVAudioPlayerNode] = []
-        for _ in 0..<CrunchTuning.voiceCount {
-            let player = AVAudioPlayerNode()
-            engine.attach(player)
-            engine.connect(player, to: mixer, format: format)  // the mixer resamples 48 kHz to the device rate
-            made.append(player)
+        guard output.sampleRate > 0, output.channelCount > 0,
+              let format = AVAudioFormat(standardFormatWithSampleRate: output.sampleRate, channels: 2) else { return }
+        // Synthesize at the device rate, so the mixer has nothing to resample.
+        let dsp = CrunchDSP(sampleRate: output.sampleRate, controls: controls, seed: UInt64.random(in: 1...UInt64.max))
+        let source = AVAudioSourceNode(format: format) { isSilence, _, frameCount, bufferList in
+            let buffers = UnsafeMutableAudioBufferListPointer(bufferList)
+            guard buffers.count >= 2,
+                  let left = buffers[0].mData?.assumingMemoryBound(to: Float.self),
+                  let right = buffers[1].mData?.assumingMemoryBound(to: Float.self) else {
+                for buffer in buffers where buffer.mData != nil { memset(buffer.mData, 0, Int(buffer.mDataByteSize)) }
+                isSilence.pointee = true
+                return noErr
+            }
+            if !dsp.render(frames: Int(frameCount), left: left, right: right) { isSilence.pointee = true }
+            return noErr
         }
-        mixer.outputVolume = CrunchTuning.masterGain
+        engine.attach(source)
+        engine.connect(source, to: engine.mainMixerNode, format: format)
+        engine.mainMixerNode.outputVolume = 1
         engine.prepare()
         configObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
@@ -166,7 +185,6 @@ final class CrunchAudio {
             }
         }
         self.engine = engine
-        players = made
     }
 
     private func tearDownEngine() {
@@ -176,10 +194,9 @@ final class CrunchAudio {
         }
         engine?.stop()
         engine = nil
-        players = []
     }
 
-    /// Pauses the engine (stopping the audio hardware) once nothing has played for `idleTimeout`.
+    /// Pauses the engine (stopping the audio hardware) once nothing has been asked for in a while.
     private func scheduleIdleCheck(after delay: Double) {
         guard !idleCheckPending else { return }
         idleCheckPending = true
@@ -187,11 +204,12 @@ final class CrunchAudio {
             guard let self = self else { return }
             self.idleCheckPending = false
             guard let engine = self.engine, engine.isRunning else { return }
-            let remaining = self.soundEndsAt + CrunchTuning.idleTimeout - ProcessInfo.processInfo.systemUptime
+            let quiet = ProcessInfo.processInfo.systemUptime - self.controls.lastActivityTime()
+            let remaining = CrunchTuning.idleTimeout + CrunchTuning.tail - quiet
             if remaining > 0.05 {
                 self.scheduleIdleCheck(after: remaining)
             } else {
-                engine.pause()  // keeps the graph and the playing players; resume costs ~45 ms
+                engine.pause()  // keeps the graph; resuming costs ~45 ms
             }
         }
     }
@@ -200,14 +218,45 @@ final class CrunchAudio {
 // MARK: - Offline rendering (used by the test harness, not by the app)
 
 extension CrunchAudio {
-    struct TestTrigger {
-        let time: Double
-        let variant: Int
-        let volume: Float
-        let pan: Float
+    enum TestCall {
+        case crunch(Float, Float)
+        case rake(Float, Float)
+        case blower(Float, Float)
     }
 
-    static var sampleRateForTesting: Double { CrunchTuning.sampleRate }
+    /// Renders `seconds` of audio through the same DSP the app uses. `calls(frame)` is asked for the
+    /// calls of each 60 Hz frame; they reach the DSP at the next `blockSize` boundary, like in the app.
+    static func renderForTesting(seconds: Double, sampleRate: Double = 48_000, blockSize: Int = 512, seed: UInt64 = 1,
+                                 calls: (Int) -> [TestCall]) -> (left: [Float], right: [Float]) {
+        let controls = CrunchControls()
+        let dsp = CrunchDSP(sampleRate: sampleRate, controls: controls, seed: seed)
+        let total = Int(seconds * sampleRate)
+        var left = [Float](repeating: 0, count: total)
+        var right = [Float](repeating: 0, count: total)
+        var frame = 0
+        var position = 0
+        left.withUnsafeMutableBufferPointer { l in
+            right.withUnsafeMutableBufferPointer { r in
+                while position < total {
+                    while Double(frame) / 60 <= Double(position) / sampleRate {
+                        let t = Double(frame) / 60
+                        for call in calls(frame) {
+                            switch call {
+                            case let .crunch(i, p): if i > 0.005 { controls.crunch(min(max(i, 0), 1), pan: p, at: t) }
+                            case let .rake(i, p): if i > 0.005 { controls.rake(min(max(i, 0), 1), pan: p, at: t) }
+                            case let .blower(v, p): controls.blower(min(max(v, 0), 1), pan: p, at: t)
+                            }
+                        }
+                        frame += 1
+                    }
+                    let n = min(blockSize, total - position)
+                    _ = dsp.render(frames: n, left: l.baseAddress! + position, right: r.baseAddress! + position)
+                    position += n
+                }
+            }
+        }
+        return (left, right)
+    }
 
     var isEngineRunningForTesting: Bool { audioQueue.sync { engine?.isRunning ?? false } }
     var hasEngineForTesting: Bool { audioQueue.sync { engine != nil } }
@@ -217,446 +266,628 @@ extension CrunchAudio {
         guard let engine = audioQueue.sync(execute: { self.engine }) else { return }
         NotificationCenter.default.post(name: .AVAudioEngineConfigurationChange, object: engine)
     }
-
-    /// The variant bank exactly as the app synthesizes it (without the silent pre-roll), lightest first.
-    static func renderBankForTesting() -> [[Float]] {
-        CrunchSynth.makeBank(seed: CrunchTuning.bankSeed).map { $0.samples }
-    }
-
-    /// Mixes a sequence of `crunch` calls offline through the same trigger logic, gains and the
-    /// mixer's equal-power pan law. Returns stereo at `sampleRateForTesting`.
-    static func renderSequenceForTesting(calls: [(time: Double, intensity: Float, pan: Float)],
-                                         duration: Double,
-                                         seed: UInt64 = 7) -> (left: [Float], right: [Float], triggers: [TestTrigger]) {
-        let bank = CrunchSynth.makeBank(seed: CrunchTuning.bankSeed)
-        let logic = CrunchTriggerLogic(bank: bank, voices: CrunchTuning.voiceCount, seed: seed)
-        let sr = CrunchTuning.sampleRate
-        let count = Int(duration * sr)
-        var left = [Float](repeating: 0, count: count)
-        var right = [Float](repeating: 0, count: count)
-        var triggers: [TestTrigger] = []
-        for call in calls {
-            guard let trig = logic.process(time: call.time, intensity: call.intensity, pan: call.pan) else { continue }
-            triggers.append(TestTrigger(time: call.time, variant: trig.variant, volume: trig.volume, pan: trig.pan))
-            let angle = (trig.pan + 1) * Float.pi / 4
-            let gain = trig.volume * CrunchTuning.masterGain
-            let gl = cos(angle) * gain, gr = sin(angle) * gain
-            let start = Int(call.time * sr) + CrunchTuning.prerollFrames
-            let samples = bank[trig.variant].samples
-            for k in 0..<samples.count where start + k < count {
-                left[start + k] += samples[k] * gl
-                right[start + k] += samples[k] * gr
-            }
-        }
-        return (left, right, triggers)
-    }
 }
 
 // MARK: - Tuning
 
 fileprivate enum CrunchTuning {
-    static let sampleRate: Double = 48_000
-    static let bufferFormat = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)
-    /// Silence before each variant: AVAudioMixer ramps volume/pan changes linearly over ~640 frames.
-    static let prerollFrames = 672
-    static let voiceCount = 10
-    static let masterGain: Float = 0.7
     static let idleTimeout: Double = 3.0
+    /// Blower spin-down and crackle settling after the last request.
+    static let tail: Double = 1.0
     static let retryDelay: Double = 2.0
-    static let bankSeed: UInt64 = 0x5275_7374_6C65  // "Rustle"
+    static let wakeInterval: Double = 0.1
 }
 
-// MARK: - Trigger logic (rate limiting, layering, variant choice)
+// MARK: - Main thread -> render thread mailbox
 
-fileprivate struct CrunchTrigger {
-    let variant: Int
-    let voice: Int
-    let volume: Float
-    let pan: Float
-    /// Seconds until the voice is silent again (pre-roll + variant + output-latency margin).
-    let duration: Double
-}
+/// A few numbers guarded by an unfair lock. The main thread holds it for a handful of stores;
+/// the render thread only ever try-locks it, so it never blocks.
+fileprivate final class CrunchControls {
+    private let lock: UnsafeMutablePointer<os_unfair_lock>
 
-/// Turns a stream of per-frame `crunch` calls into a natural, irregular sequence of layered crunches.
-/// Shared by the live player and the offline renderer so the analysis matches what the app plays.
-fileprivate final class CrunchTriggerLogic {
-    private let weights: [Float]
-    private let durations: [Double]
-    private var voiceFreeAt: [Double]
-    private var rng: CrunchRNG
+    var crunchPending = false
+    var crunchMax: Float = 0
+    var crunchPanSum: Float = 0
+    var crunchWeight: Float = 0
+    var rakePending = false
+    var rakeMax: Float = 0
+    var rakePanSum: Float = 0
+    var rakeWeight: Float = 0
+    var blowerLevel: Float = 0
+    var blowerPan: Float = 0
+    private var activity = -Double.infinity
 
-    private var lastCall = -Double.infinity
-    private var lastTrigger = -Double.infinity
-    private var nextGap = 0.0
-    private var energy: Float = 0
-    private var peak: Float = 0
-    private var panSum: Float = 0
-    private var calls = 0
-    private var recent: [Int] = []
-
-    init(bank: [CrunchVariant], voices: Int, seed: UInt64) {
-        weights = bank.map { $0.weight }
-        durations = bank.map {
-            Double(CrunchTuning.prerollFrames + $0.samples.count) / CrunchTuning.sampleRate + 0.03
-        }
-        voiceFreeAt = [Double](repeating: -Double.infinity, count: voices)
-        rng = CrunchRNG(seed: seed)
+    init() {
+        lock = .allocate(capacity: 1)
+        lock.initialize(to: os_unfair_lock())
     }
 
-    func process(time t: Double, intensity: Float, pan: Float) -> CrunchTrigger? {
-        let i = intensity.isFinite ? min(max(intensity, 0), 1) : 0
-        let p = pan.isFinite ? min(max(pan, -1), 1) : 0
-        if t - lastCall > 0.12 { resetAccumulators() }  // the cursor paused: old contributions are stale
-        lastCall = t
-        guard i >= 0.02 else { return nil }
-
-        // Accumulate between triggers so a run of tiny calls adds up to one rustle.
-        energy += i
-        peak = max(peak, i)
-        panSum += p * i
-        calls += 1
-        guard t - lastTrigger >= nextGap, energy >= 0.09 else { return nil }
-
-        let level = min(1, 0.65 * peak + 0.35 * energy / Float(calls))
-        let focus = panSum / energy
-        resetAccumulators()
-        lastTrigger = t
-        // Gap shrinks with intensity (~90-170 ms when brushing, ~40-75 ms when ploughing), jittered so
-        // the texture never settles into a machine-gun rhythm.
-        let base = 0.05 + 0.065 * Double((1 - level) * (1 - level))
-        nextGap = base * Double(rng.uniform(0.8, 1.5))
-
-        // Barely-touched leaves (below ~0.06) only rustle now and then.
-        if level < 0.06 && rng.unit() > (level / 0.06) * (level / 0.06) {
-            nextGap *= 0.6
-            return nil
-        }
-        guard let voice = voiceFreeAt.firstIndex(where: { $0 <= t }) else { return nil }
-
-        var active = 0
-        for end in voiceFreeAt where end > t { active += 1 }
-        let accent: Bool, contrast: Float
-        if active == 0 {
-            // An isolated touch (first contact) always gets a full crunch for its intensity.
-            accent = false
-            contrast = rng.uniform(0.85, 1.05)
-        } else {
-            // While layering, every few triggers is an accent (a heavier, louder crunch) so fast
-            // ploughing keeps distinct crunches instead of blurring into a wall of noise.
-            accent = rng.unit() < 0.12 + 0.18 * level
-            contrast = accent ? rng.uniform(1.0, 1.15) : rng.uniform(0.45, 0.85)
-        }
-        let variant = pickVariant(level: accent ? min(1, level + 0.15) : level)
-        // Soft loudness cap: each extra overlapping voice pulls the new one down a little.
-        let layering = 1 / (1 + 0.22 * Float(active)).squareRoot()
-        let volume = (0.5 + 0.5 * pow(level, 0.9)) * contrast * layering
-        let outPan = min(max(focus * 0.8 + rng.uniform(-0.08, 0.08), -0.85), 0.85)
-
-        voiceFreeAt[voice] = t + durations[variant]
-        recent.append(variant)
-        if recent.count > 3 { recent.removeFirst() }
-        return CrunchTrigger(variant: variant, voice: voice, volume: volume, pan: outPan,
-                             duration: durations[variant])
+    deinit {
+        lock.deinitialize(count: 1)
+        lock.deallocate()
     }
 
-    private func resetAccumulators() {
-        energy = 0
-        peak = 0
-        panSum = 0
-        calls = 0
+    func tryLock() -> Bool { os_unfair_lock_trylock(lock) }
+    func unlock() { os_unfair_lock_unlock(lock) }
+
+    func crunch(_ level: Float, pan: Float, at time: Double) {
+        os_unfair_lock_lock(lock)
+        crunchPending = true
+        crunchMax = max(crunchMax, level)
+        crunchPanSum += pan * level
+        crunchWeight += level
+        activity = time
+        os_unfair_lock_unlock(lock)
     }
 
-    /// Weighted pick of a variant whose weight is near the (jittered) level, never one of the last three.
-    private func pickVariant(level: Float) -> Int {
-        let target = min(max(level + rng.uniform(-0.12, 0.12), 0), 1)
-        var total: Float = 0
-        for (k, w) in weights.enumerated() where !recent.contains(k) {
-            let d = (w - target) / 0.14
-            total += exp(-d * d)
-        }
-        var pick = rng.unit() * total
-        var fallback = 0
-        for (k, w) in weights.enumerated() where !recent.contains(k) {
-            let d = (w - target) / 0.14
-            pick -= exp(-d * d)
-            fallback = k
-            if pick <= 0 { return k }
-        }
-        return fallback
+    func rake(_ level: Float, pan: Float, at time: Double) {
+        os_unfair_lock_lock(lock)
+        rakePending = true
+        rakeMax = max(rakeMax, level)
+        rakePanSum += pan * level
+        rakeWeight += level
+        activity = time
+        os_unfair_lock_unlock(lock)
+    }
+
+    func blower(_ level: Float, pan: Float, at time: Double) {
+        os_unfair_lock_lock(lock)
+        blowerLevel = level
+        blowerPan = pan
+        if level > 0 { activity = time }
+        os_unfair_lock_unlock(lock)
+    }
+
+    func silence() {
+        os_unfair_lock_lock(lock)
+        crunchPending = false
+        crunchMax = 0; crunchPanSum = 0; crunchWeight = 0
+        rakePending = false
+        rakeMax = 0; rakePanSum = 0; rakeWeight = 0
+        blowerLevel = 0
+        os_unfair_lock_unlock(lock)
+    }
+
+    func lastActivityTime() -> Double {
+        os_unfair_lock_lock(lock)
+        defer { os_unfair_lock_unlock(lock) }
+        return activity
     }
 }
 
-// MARK: - Synthesis
+// MARK: - Synthesis (render thread)
 
-fileprivate struct CrunchVariant {
-    let samples: [Float]
-    /// 0 = faint papery rustle ... 1 = big dense crunch.
-    let weight: Float
-}
+/// All the sound, rendered block by block on the audio render thread. No allocation, no locks
+/// (beyond a try-lock), no Swift arrays in the render path.
+fileprivate final class CrunchDSP {
+    private static let chunk = 256
+    private static let voiceCount = 96
+    private static let stride = 16  // floats of state per click voice
 
-fileprivate enum CrunchSynth {
-    static let variantCount = 24
+    private let sr: Float
+    private let invSr: Float
+    private let controls: CrunchControls
+    private let rng: UnsafeMutablePointer<CrunchNoise>
 
-    static func makeBank(seed: UInt64) -> [CrunchVariant] {
-        (0..<variantCount).map { k in
-            var rng = CrunchRNG(seed: seed &+ UInt64(k + 1) &* 0x9E37_79B9_7F4A_7C15)
-            let weight = Float(k) / Float(variantCount - 1)
-            return CrunchVariant(samples: makeVariant(weight: weight, rng: &rng), weight: weight)
-        }
+    // Click voices (struct of arrays). A voice is a short excitation ringing one or two resonant
+    // modes. Float state layout per voice: 0 excitation gain, 1-2 excitation history,
+    // 3-4 mode-1 state, 5-7 mode-1 coefficients (a1, a2, b0), 8-9 mode-2 state,
+    // 10-12 mode-2 coefficients, 13-14 left/right gain.
+    private let life: UnsafeMutablePointer<Int32>
+    private let start: UnsafeMutablePointer<Int32>
+    private let excitation: UnsafeMutablePointer<Int32>
+    private let state: UnsafeMutablePointer<Float>
+    private var nextVoice = 0
+    private var liveVoices = 0
+
+    // Per-sample smoothing factors (1 - exp(-1 / (tau * sr))).
+    private let kCrunchAttack: Float, kCrunchHeld: Float, kCrunchRelease: Float
+    private let kRakeAttack: Float, kRakeHeld: Float, kRakeRelease: Float
+    private let kSpinUp: Float, kSpinDown: Float
+    private let kCompDetect: Float, kCompAttack: Float, kCompRelease: Float
+    private let crunchHold: Int, rakeHold: Int
+    private let crunchHawkesDecay: Float, rakeHawkesDecay: Float
+    // Per-chunk Ornstein-Uhlenbeck factors (exp(-chunk / tau)).
+    private let ou40: Float, ou60: Float, ou90: Float, ou150: Float, ou300: Float, ou35: Float
+
+    // Crunch: smoothed intensity envelope, Hawkes excitation (events/s), slow rate modulation.
+    private var cEnv: Float = 0, cTarget: Float = 0, cHoldLeft = 0, cPan: Float = 0
+    private var cHawkes: Float = 0, cWave: Float = 0, cWave2: Float = 0
+    private var kickAt = -1
+
+    // Rake.
+    private var rEnv: Float = 0, rTarget: Float = 0, rHoldLeft = 0, rPan: Float = 0, rPanSmooth: Float = 0
+    private var rHawkes: Float = 0, rWave: Float = 0, rSwishWave: Float = 0, rSwishTone: Float = 0
+    private var swishGain: Float = 0
+    private var swishBandL = CrunchSVF(), swishBandR = CrunchSVF(), swishHighL = CrunchSVF(), swishHighR = CrunchSVF()
+    private let tineTimer: UnsafeMutablePointer<Float>  // samples until each tine's next scrape tick
+    private let tineWave: UnsafeMutablePointer<Float>
+    private let tineGate: UnsafeMutablePointer<Float>
+
+    // Blower.
+    private var bTarget: Float = 0, bSpinA: Float = 0, bSpin: Float = 0, bPan: Float = 0, bPanSmooth: Float = 0
+    private var bPhase: Float = 0, bSlow: Float = 0, bFast: Float = 0, bWobble: Float = 0, bFlutter: Float = 1
+    private var pinkL = (Float(0), Float(0), Float(0)), pinkR = (Float(0), Float(0), Float(0))
+    private var airHighL = CrunchSVF(), airHighR = CrunchSVF(), airLowL = CrunchSVF(), airLowR = CrunchSVF()
+    private var airBodyL = CrunchSVF(), airBodyR = CrunchSVF()
+
+    // Master safety: slow loudness compressor, then a soft clipper on the rare peak.
+    private var compPower: Float = 0, compGain: Float = 1
+
+    init(sampleRate: Double, controls: CrunchControls, seed: UInt64) {
+        sr = Float(sampleRate)
+        invSr = 1 / sr
+        self.controls = controls
+        rng = .allocate(capacity: 1)
+        rng.initialize(to: CrunchNoise(seed: seed))
+        let n = Self.voiceCount
+        life = .allocate(capacity: n); life.initialize(repeating: 0, count: n)
+        start = .allocate(capacity: n); start.initialize(repeating: 0, count: n)
+        excitation = .allocate(capacity: n); excitation.initialize(repeating: 0, count: n)
+        state = .allocate(capacity: n * Self.stride); state.initialize(repeating: 0, count: n * Self.stride)
+        tineTimer = .allocate(capacity: 3); tineTimer.initialize(repeating: 0, count: 3)
+        tineWave = .allocate(capacity: 3); tineWave.initialize(repeating: 0, count: 3)
+        tineGate = .allocate(capacity: 3); tineGate.initialize(repeating: 0, count: 3)
+
+        let rate = sr
+        func k(_ tau: Float) -> Float { 1 - exp(-1 / (tau * rate)) }
+        func ou(_ tau: Float) -> Float { exp(-Float(Self.chunk) / (tau * rate)) }
+        kCrunchAttack = k(0.004); kCrunchHeld = k(0.04); kCrunchRelease = k(0.055)
+        kRakeAttack = k(0.03); kRakeHeld = k(0.05); kRakeRelease = k(0.07)
+        kSpinUp = k(0.063); kSpinDown = k(0.148)  // two cascaded stages: ~0.3 s up, ~0.7 s down
+        kCompDetect = k(0.05); kCompAttack = k(0.01); kCompRelease = k(0.3)
+        crunchHold = Int(0.07 * rate); rakeHold = Int(0.08 * rate)
+        crunchHawkesDecay = exp(-1 / (0.007 * rate)); rakeHawkesDecay = exp(-1 / (0.006 * rate))
+        ou40 = ou(0.04); ou60 = ou(0.06); ou90 = ou(0.09); ou150 = ou(0.15); ou300 = ou(0.3); ou35 = ou(0.035)
     }
 
-    /// One crunch: 1-3 compressions, each a cluster of fibre snaps that is densest at its start and
-    /// thins out; a bed of faint papery micro-grains; and a soft low crush layer that follows the snaps.
-    static func makeVariant(weight w: Float, rng: inout CrunchRNG) -> [Float] {
-        let sr = Float(CrunchTuning.sampleRate)
-        let duration = min(0.40, max(0.075, (0.08 + 0.26 * pow(w, 0.85)) * rng.uniform(0.85, 1.15)))
-        let n = Int(duration * sr)
-        let bright = rng.uniform(0.88, 1.14)  // per-variant timbre, stands in for pitch variety
+    deinit {
+        rng.deinitialize(count: 1); rng.deallocate()
+        life.deallocate(); start.deallocate(); excitation.deallocate(); state.deallocate()
+        tineTimer.deallocate(); tineWave.deallocate(); tineGate.deallocate()
+    }
 
-        struct Burst { let onset: Float; let length: Float; let strength: Float }
-        var bursts = [Burst(onset: rng.uniform(0.0016, 0.004), length: duration * rng.uniform(0.3, 0.5), strength: 1)]
-        let extra: Int
-        if w < 0.3 { extra = rng.unit() < 0.25 ? 1 : 0 } else if w < 0.7 { extra = 1 } else { extra = rng.unit() < 0.25 ? 2 : 1 }
-        for _ in 0..<extra {
-            let onset = duration * rng.uniform(0.08, 0.35)
-            bursts.append(Burst(onset: onset, length: (duration - onset) * rng.uniform(0.25, 0.5),
-                                strength: rng.uniform(0.4, 0.8)))
+    /// Renders `frames` stereo samples. Returns false when the output is pure silence.
+    func render(frames: Int, left: UnsafeMutablePointer<Float>, right: UnsafeMutablePointer<Float>) -> Bool {
+        consumeControls()
+        var audible = false
+        var offset = 0
+        while offset < frames {
+            let n = min(Self.chunk, frames - offset)
+            if renderChunk(n, left + offset, right + offset) { audible = true }
+            offset += n
         }
+        return audible
+    }
 
-        // Activity envelope: drives the paper grains and the crush layer.
-        var activity = [Float](repeating: 0, count: n)
-        for b in bursts {
-            let start = Int(b.onset * sr), attack = max(1, Int(0.003 * sr)), tau = 0.25 * b.length * sr
-            for k in max(0, start)..<n {
-                let x = Float(k - start)
-                activity[k] += b.strength * min(1, x / Float(attack)) * exp(-x / tau)
+    private func consumeControls() {
+        guard controls.tryLock() else { return }  // main thread is mid-write: pick it up next block
+        var crunch: (Float, Float)? = nil, rake: (Float, Float)? = nil
+        if controls.crunchPending {
+            crunch = (controls.crunchMax, controls.crunchPanSum / max(controls.crunchWeight, 1e-6))
+            controls.crunchPending = false
+            controls.crunchMax = 0; controls.crunchPanSum = 0; controls.crunchWeight = 0
+        }
+        if controls.rakePending {
+            rake = (controls.rakeMax, controls.rakePanSum / max(controls.rakeWeight, 1e-6))
+            controls.rakePending = false
+            controls.rakeMax = 0; controls.rakePanSum = 0; controls.rakeWeight = 0
+        }
+        bTarget = controls.blowerLevel
+        bPan = controls.blowerPan
+        controls.unlock()
+
+        if let (level, pan) = crunch {
+            // A sudden rise (a fresh kick) sets off an immediate cluster of snaps.
+            let rise = level - cEnv
+            if rise > 0.06 {
+                cHawkes += 900 * rise
+                kickAt = Int(rng.pointee.unit() * 48)
             }
+            cTarget = level
+            cHoldLeft = crunchHold
+            cPan = pan
         }
-
-        // 1) Fibre snaps.
-        var snaps = [Float](repeating: 0, count: n)
-        let snapCount = Int((20 + 170 * pow(w, 1.1)) * rng.uniform(0.8, 1.2))
-        let totalStrength = bursts.reduce(0) { $0 + $1.strength }
-        let spread = 2.4 - 1.0 * w  // light rustles: a few louder ticks among small ones; crunches: fuller
-        for b in bursts {
-            let count = Int(Float(snapCount) * b.strength / totalStrength)
-            for _ in 0..<count {
-                let pos = pow(rng.unit(), 1.9)
-                let amp = b.strength * (0.12 + 0.88 * pow(rng.unit(), spread)) * (1 - 0.55 * pos)
-                addSnap(&snaps, at: Int((b.onset + b.length * pos) * sr), amp: amp, bright: bright, rng: &rng)
-            }
-        }
-        let settling = Int((2 + 18 * w) * rng.uniform(0.7, 1.3))
-        for _ in 0..<settling {
-            let pos = rng.uniform(0.25, 0.92)
-            addSnap(&snaps, at: Int(pos * duration * sr), amp: rng.uniform(0.04, 0.22) * (1.2 - pos),
-                    bright: bright, rng: &rng)
-        }
-
-        // 2) Paper grain: dense, faint micro-grains that follow the activity envelope.
-        var grains = [Float](repeating: 0, count: n)
-        let peakActivity = max(activity.max() ?? 1, 1e-6)
-        let grainTries = Int((1500 + 2500 * w) * duration)
-        for _ in 0..<grainTries {
-            let k = Int(rng.unit() * Float(n - 1))
-            let a = activity[k] / peakActivity
-            guard rng.unit() < a else { continue }
-            addGrain(&grains, at: k, amp: a * rng.uniform(0.25, 1), bright: bright, rng: &rng)
-        }
-
-        // 3) Crush body: low band-passed noise shaped by the activity and by the snaps themselves.
-        var snapEnv = [Float](repeating: 0, count: n)
-        var follower: Float = 0
-        let rel = exp(-1 / (0.006 * sr))
-        for k in 0..<n {
-            let x = abs(snaps[k])
-            follower = x > follower ? x : follower * rel
-            snapEnv[k] = follower
-        }
-        let snapEnvPeak = max(snapEnv.max() ?? 1, 1e-6)
-        var body = [Float](repeating: 0, count: n)
-        let bodyFc = (650 + 650 * w) * rng.uniform(0.85, 1.15)
-        var lp1 = CrunchBiquad.lowpass(bodyFc, q: 0.8), lp2 = CrunchBiquad.lowpass(bodyFc, q: 0.6)
-        var hp = CrunchBiquad.highpass(170 + 90 * w, q: 0.7)
-        let bodyAttack = rng.uniform(0.004, 0.012) * sr, bodyTau = (0.022 + 0.04 * w) * sr
-        let bodyStart = Int(bursts[0].onset * sr)
-        for k in 0..<n {
-            let noise = hp.process(lp2.process(lp1.process(rng.bipolar())))
-            let x = Float(max(0, k - bodyStart))
-            let env = min(1, x / bodyAttack) * (0.6 * exp(-x / bodyTau) + 0.4 * activity[k] / peakActivity)
-            body[k] = noise * env * (0.35 + 0.65 * min(1, 2 * snapEnv[k] / snapEnvPeak))
-        }
-
-        // Mix by RMS ratios relative to the snaps.
-        let snapRMS = rms(snaps)
-        let grainRatio = dB(-9 - 6 * w), bodyRatio = dB(-13 + 8 * w)
-        let gGrain = snapRMS * grainRatio / max(rms(grains), 1e-9)
-        let gBody = snapRMS * bodyRatio / max(rms(body), 1e-9)
-        var out = [Float](repeating: 0, count: n)
-        var air = CrunchBiquad.lowpass(11_000, q: 0.707)
-        for k in 0..<n { out[k] = air.process(snaps[k] + gGrain * grains[k] + gBody * body[k]) }
-
-        // Loudness: onset RMS from -22 dBFS (rustle) to -18 dBFS (crunch); the odd outlier snap is
-        // then smoothly limited so peaks stay below -4.4 dBFS before any layering.
-        let onsetRMS = rms(out[0..<min(n, Int(0.12 * sr))])
-        let gain = dB(-22 + 4 * w) / max(onsetRMS, 1e-9)
-        for k in 0..<n { out[k] *= gain }
-        limitPeaks(&out, ceiling: 0.6)
-
-        // DC blocker (30 Hz), then click-free edges: 1.5 ms fade-in, 15 ms fade-out (raised cosine).
-        var dcX: Float = 0, dcY: Float = 0
-        let dcR = exp(-2 * Float.pi * 30 / sr)
-        for k in 0..<n {
-            dcY = out[k] - dcX + dcR * dcY
-            dcX = out[k]
-            out[k] = dcY
-        }
-        let fadeIn = Int(0.0015 * sr), fadeOut = Int(0.015 * sr)
-        for k in 0..<fadeIn { out[k] *= 0.5 - 0.5 * cos(Float.pi * Float(k) / Float(fadeIn)) }
-        for k in 0..<fadeOut { out[n - 1 - k] *= 0.5 - 0.5 * cos(Float.pi * Float(k) / Float(fadeOut)) }
-
-        // A few ms of leading silence, different per variant, so onsets don't all land on the 60 Hz call grid.
-        let offset = Int(rng.uniform(0, 0.009) * sr)
-        return [Float](repeating: 0, count: offset) + out
-    }
-
-    /// Offline look-ahead limiter: the gain envelope dips smoothly (~1 ms) around any sample above `ceiling`.
-    static func limitPeaks(_ x: inout [Float], ceiling: Float) {
-        let n = x.count, reach = 48  // 1 ms
-        // Running minimum (+-reach) of the gain each over-ceiling sample needs...
-        var floor = [Float](repeating: 1, count: n)
-        var any = false
-        for k in 0..<n where abs(x[k]) > ceiling {
-            any = true
-            let g = ceiling / abs(x[k])
-            for j in max(0, k - reach)...min(n - 1, k + reach) where g < floor[j] { floor[j] = g }
-        }
-        guard any else { return }
-        // ...then a centred box average half as wide: smooth, and never above what a peak needs.
-        var prefix = [Double](repeating: 0, count: n + 1)
-        for k in 0..<n { prefix[k + 1] = prefix[k] + Double(floor[k]) }
-        let h = reach / 2
-        for k in 0..<n {
-            let a = max(0, k - h), b = min(n, k + h + 1)
-            x[k] *= Float((prefix[b] - prefix[a]) / Double(b - a))
+        if let (level, pan) = rake {
+            rTarget = level
+            rHoldLeft = rakeHold
+            rPan = pan
         }
     }
 
-    /// A fibre snap: either a short noise burst through a resonant band-pass, or a tiny damped "tick".
-    static func addSnap(_ buf: inout [Float], at start: Int, amp: Float, bright: Float, rng: inout CrunchRNG) {
-        guard start >= 0, start < buf.count else { return }
-        let sr = Float(CrunchTuning.sampleRate)
-        let fc = min(10_500, rng.logUniform(1500, 9000) * bright)
-        let level = amp * pow(3000 / fc, 0.15)  // slight tilt so the top end stays crisp, not harsh
-        if rng.unit() < 0.3 {
-            let tau = rng.uniform(0.00012, 0.0006) * sr
-            let len = min(buf.count - start, Int(tau * 6))
-            let omega = 2 * Float.pi * fc / sr
-            let phase = rng.uniform(0, 2 * Float.pi)
-            for k in 0..<len {
-                let x = Float(k)
-                buf[start + k] += 0.8 * level * min(1, x / 2) * exp(-x / tau) * sin(phase + omega * x)
+    private func renderChunk(_ n: Int, _ left: UnsafeMutablePointer<Float>, _ right: UnsafeMutablePointer<Float>) -> Bool {
+        left.update(repeating: 0, count: n)
+        right.update(repeating: 0, count: n)
+        let crackleIdle = cEnv < 1e-4 && cHoldLeft == 0 && cHawkes < 0.5 && kickAt < 0
+            && rEnv < 1e-4 && rHoldLeft == 0 && rHawkes < 0.5 && liveVoices == 0
+        let blowerIdle = bSpin < 1e-5 && bSpinA < 1e-5 && bTarget == 0
+        if crackleIdle && blowerIdle {
+            compGain = 1
+            compPower = 0
+            return false
+        }
+        if !crackleIdle {
+            let rakeEnvBefore = rEnv
+            spawnEvents(n)
+            renderVoices(n, left, right)
+            renderSwish(n, left, right, from: rakeEnvBefore, to: rEnv)
+        }
+        if !blowerIdle { renderBlower(n, left, right) }
+        master(n, left, right)
+        return true
+    }
+
+    // MARK: Events
+
+    @inline(__always) private func ou(_ z: inout Float, _ a: Float) {
+        z = z * a + (1 - a * a).squareRoot() * rng.pointee.gauss()
+    }
+
+    /// Walks the chunk sample by sample, updating the envelopes and drawing fracture events.
+    private func spawnEvents(_ n: Int) {
+        ou(&cWave, ou60); ou(&cWave2, ou90); ou(&rWave, ou90)
+        ou(&rSwishWave, ou60); ou(&rSwishTone, ou150)
+        for t in 0..<3 {
+            ou(&tineWave[t], ou150)
+            ou(&tineGate[t], ou90)
+        }
+        // Slow, aperiodic "waves" in the crumpling rate (doubly stochastic Poisson process).
+        let snapRate = 900 * exp(0.55 * cWave - 0.15)
+        let crinkleRate = 2200 * exp(0.45 * cWave2 - 0.1)
+        let rakeCrinkleRate = 3600 * exp(0.5 * rWave - 0.125)
+        let rakeSnapRate = 110 * exp(0.5 * rWave - 0.125)
+        let crunchStep: Float = 0.55 / 0.007  // Hawkes branching ratio 0.55 over a 7 ms kernel
+        let rakeStep: Float = 0.35 / 0.006
+
+        var envC = cEnv, targetC = cTarget, holdC = cHoldLeft, hawkesC = cHawkes
+        var envR = rEnv, targetR = rTarget, holdR = rHoldLeft, hawkesR = rHawkes
+        let r = rng
+        for i in 0..<n {
+            // Crunch envelope: fast attack, held while calls keep coming, then a natural settle.
+            if holdC > 0 {
+                holdC -= 1
+                envC += (targetC - envC) * (targetC > envC ? kCrunchAttack : kCrunchHeld)
+            } else {
+                targetC = 0
+                envC -= envC * kCrunchRelease
             }
-        } else {
-            let q = rng.uniform(1.0, 4.5)
-            let burst = max(4, Int(rng.logUniform(0.0004, 0.004) * sr))
-            let ring = Int(3 * q / (Float.pi * fc) * sr)
-            let total = min(buf.count - start, burst + ring)
-            var filter = CrunchBiquad.bandpass(fc, q: q)
-            let norm = 0.33 / ((Float.pi / 2) * (fc / q) / (sr / 2)).squareRoot()
-            let attack = max(2, Int(0.00008 * sr))
-            let tau = Float(burst) / 3.5
-            for k in 0..<total {
-                var x: Float = 0
-                if k < burst {
-                    x = rng.bipolar() * 1.732 * min(1, Float(k) / Float(attack)) * exp(-Float(k) / tau)
+            if i == kickAt {
+                spawnCrunchSnap(i, env: max(envC, targetC), kick: true)
+                kickAt = -1
+            }
+            if envC > 1e-4 || hawkesC > 0.5 {
+                let lambda = snapRate * envC * pow(envC, 0.2) + hawkesC
+                if r.pointee.unit() < lambda * invSr {
+                    spawnCrunchSnap(i, env: envC, kick: false)
+                    hawkesC += crunchStep
                 }
-                buf[start + k] += level * norm * filter.process(x)
+                if r.pointee.unit() < crinkleRate * envC * invSr { spawnCrunchCrinkle(i, env: envC) }
             }
+            hawkesC *= crunchHawkesDecay
+
+            // Rake envelope.
+            if holdR > 0 {
+                holdR -= 1
+                envR += (targetR - envR) * (targetR > envR ? kRakeAttack : kRakeHeld)
+            } else {
+                targetR = 0
+                envR -= envR * kRakeRelease
+            }
+            if envR > 1e-4 || hawkesR > 0.5 {
+                if r.pointee.unit() < rakeCrinkleRate * envR * invSr { spawnRakeCrinkle(i, env: envR) }
+                if r.pointee.unit() < (rakeSnapRate * envR * envR + hawkesR) * invSr {
+                    spawnRakeSnap(i, env: envR)
+                    hawkesR += rakeStep
+                }
+                if envR > 0.01 {
+                    for t in 0..<3 {
+                        tineTimer[t] -= 1
+                        if tineTimer[t] <= 0 { scrape(t, at: i, env: envR) }
+                    }
+                }
+            }
+            hawkesR *= rakeHawkesDecay
+        }
+        if kickAt >= 0 { kickAt = -1 }
+        cEnv = envC; cTarget = targetC; cHoldLeft = holdC; cHawkes = hawkesC
+        rEnv = envR; rTarget = targetR; rHoldLeft = holdR; rHawkes = hawkesR
+    }
+
+    /// Clipped Pareto (power-law) amplitude in (0, 1]: mostly faint, now and then a loud one.
+    @inline(__always) private func powerLaw(alpha: Float, range: Float) -> Float {
+        min(range, pow(max(rng.pointee.unit(), 1e-7), -1 / alpha)) / range
+    }
+
+    private func spawnCrunchSnap(_ at: Int, env: Float, kick: Bool) {
+        let r = rng
+        var x = powerLaw(alpha: 2.1, range: 10)
+        if kick { x = max(x, r.pointee.uniform(0.3, 0.9)) }  // a fresh kick starts with a crisp snap
+        let loudness = 0.45 + 0.55 * env.squareRoot()
+        let f: Float, q: Float, ratio: Float, second: Float
+        if x > 0.45 && r.pointee.unit() < 0.2 {
+            // A big fragment breaking: lower and rounder (this is all the "body" there is).
+            f = r.pointee.logUniform(800, 1600); q = r.pointee.logUniform(1.8, 3.5)
+            ratio = r.pointee.uniform(1.9, 2.8); second = r.pointee.uniform(0.35, 0.7)
+        } else {
+            f = r.pointee.logUniform(1400, 9000); q = r.pointee.logUniform(2.5, 9)
+            ratio = r.pointee.uniform(1.45, 2.7); second = r.pointee.uniform(0.15, 0.55)
+        }
+        let amp = x * loudness * pow(f / 3000, -0.2) * 1.05
+        voice(at, amp: amp, f, q: q, f * ratio, q2: q * r.pointee.uniform(0.6, 1), second: second,
+              excitation: 1 + Int(r.pointee.unit() * 3), pan: cPan + 0.22 * r.pointee.gauss())
+    }
+
+    private func spawnCrunchCrinkle(_ at: Int, env: Float) {
+        let r = rng
+        let amp = powerLaw(alpha: 2.4, range: 8) * (0.45 + 0.55 * env.squareRoot()) * 0.5
+        voice(at, amp: amp, r.pointee.logUniform(2500, 9000), q: r.pointee.logUniform(1.5, 5), 0, q2: 1, second: 0,
+              excitation: 1 + Int(r.pointee.unit() * 2), pan: cPan + 0.3 * r.pointee.gauss())
+    }
+
+    private func spawnRakeCrinkle(_ at: Int, env: Float) {
+        let r = rng
+        let amp = powerLaw(alpha: 2.6, range: 10) * (0.3 + 0.7 * env) * 1.0
+        voice(at, amp: amp, r.pointee.logUniform(1200, 6500), q: r.pointee.logUniform(1.4, 4.5), 0, q2: 1, second: 0,
+              excitation: 1 + Int(r.pointee.unit() * 2), pan: rPan + 0.3 * r.pointee.gauss())
+    }
+
+    private func spawnRakeSnap(_ at: Int, env: Float) {
+        let r = rng
+        let f = r.pointee.logUniform(1200, 6000)
+        let amp = powerLaw(alpha: 1.8, range: 14) * (0.3 + 0.7 * env) * 1.7 * pow(f / 3000, -0.2)
+        voice(at, amp: amp, f, q: r.pointee.logUniform(2.5, 7), f * r.pointee.uniform(1.5, 2.6), q2: 3,
+              second: r.pointee.uniform(0.15, 0.5), excitation: 1 + Int(r.pointee.unit() * 3),
+              pan: rPan + 0.25 * r.pointee.gauss())
+    }
+
+    /// One tine catching on the ground: a thin dry tick. Gamma(3)-distributed gaps give a scratchy,
+    /// irregular scrape rather than a pitched buzz.
+    private func scrape(_ t: Int, at: Int, env: Float) {
+        let r = rng
+        let rate = (70 + 300 * env) * exp(0.35 * tineWave[t])
+        let gap = -log(max(r.pointee.unit(), 1e-7) * max(r.pointee.unit(), 1e-7) * max(r.pointee.unit(), 1e-7)) / (3 * rate)
+        tineTimer[t] = gap * sr
+        let gate = min(max(0.55 + 0.6 * tineGate[t], 0), 1)
+        let amp = env * gate * (0.35 + 0.65 * r.pointee.unit()) * 0.6
+        voice(at, amp: amp, r.pointee.logUniform(2500, 6500), q: r.pointee.logUniform(2, 3.5), 0, q2: 1, second: 0,
+              excitation: 1, pan: rPan + (Float(t) - 1) * 0.12 + 0.05 * r.pointee.gauss())
+    }
+
+    private func voice(_ at: Int, amp: Float, _ f1: Float, q q1: Float, _ f2: Float, q2: Float, second: Float,
+                       excitation exc: Int, pan: Float) {
+        guard amp > 1e-5 else { return }
+        var slot = -1
+        for k in 0..<Self.voiceCount {
+            let v = (nextVoice + k) % Self.voiceCount
+            if life[v] == 0 { slot = v; break }
+        }
+        guard slot >= 0 else { return }  // all busy: a dropped tick is inaudible
+        nextVoice = (slot + 1) % Self.voiceCount
+        let p = state + slot * Self.stride
+        let top = 0.45 * sr
+        let fa = min(f1, top)
+        let r1 = exp(-Float.pi * fa / (q1 * sr)), w1 = 2 * Float.pi * fa / sr
+        p[5] = -2 * r1 * cos(w1); p[6] = r1 * r1
+        p[7] = amp * (1 - r1).squareRoot()  // equal energy whatever the pitch and ring time
+        var ring = 6.9 * q1 * sr / (Float.pi * fa)
+        if second > 0 && f2 < top {
+            let r2 = exp(-Float.pi * f2 / (q2 * sr)), w2 = 2 * Float.pi * f2 / sr
+            p[10] = -2 * r2 * cos(w2); p[11] = r2 * r2
+            p[12] = amp * second * (1 - r2).squareRoot()
+            ring = max(ring, 6.9 * q2 * sr / (Float.pi * f2))
+        } else {
+            p[10] = 0; p[11] = 0; p[12] = 0
+        }
+        p[0] = 1 / Float(exc).squareRoot()
+        p[1] = 0; p[2] = 0; p[3] = 0; p[4] = 0; p[8] = 0; p[9] = 0
+        let theta = (min(max(pan, -1), 1) + 1) * Float.pi / 4
+        p[13] = cos(theta); p[14] = sin(theta)
+        life[slot] = Int32(min(ring, 0.05 * sr)) + Int32(exc) + 3
+        start[slot] = Int32(at)
+        excitation[slot] = Int32(exc)
+        liveVoices += 1
+    }
+
+    private func renderVoices(_ n: Int, _ left: UnsafeMutablePointer<Float>, _ right: UnsafeMutablePointer<Float>) {
+        var live = 0
+        let r = rng
+        for v in 0..<Self.voiceCount where life[v] > 0 {
+            let p = state + v * Self.stride
+            var x1 = p[1], x2 = p[2], y1 = p[3], y2 = p[4], z1 = p[8], z2 = p[9]
+            let gain = p[0], a1 = p[5], a2 = p[6], b0 = p[7], c1 = p[10], c2 = p[11], d0 = p[12]
+            let gl = p[13], gr = p[14]
+            var exc = Int(excitation[v])
+            let first = Int(start[v])
+            let remaining = Int(life[v])
+            let stop = min(n, first + remaining)
+            var i = first
+            if d0 == 0 {
+                while i < stop {
+                    var x: Float = 0
+                    if exc > 0 { x = gain * r.pointee.bipolar(); exc -= 1 }
+                    let d = x - x2; x2 = x1; x1 = x
+                    let y = b0 * d - a1 * y1 - a2 * y2; y2 = y1; y1 = y
+                    left[i] += y * gl; right[i] += y * gr
+                    i += 1
+                }
+            } else {
+                while i < stop {
+                    var x: Float = 0
+                    if exc > 0 { x = gain * r.pointee.bipolar(); exc -= 1 }
+                    let d = x - x2; x2 = x1; x1 = x
+                    let y = b0 * d - a1 * y1 - a2 * y2; y2 = y1; y1 = y
+                    let z = d0 * d - c1 * z1 - c2 * z2; z2 = z1; z1 = z
+                    let s = y + z
+                    left[i] += s * gl; right[i] += s * gr
+                    i += 1
+                }
+            }
+            p[1] = x1; p[2] = x2; p[3] = y1; p[4] = y2; p[8] = z1; p[9] = z2
+            excitation[v] = Int32(exc)
+            start[v] = 0
+            let left = remaining - (stop - first)
+            life[v] = Int32(max(0, left))
+            if left > 0 { live += 1 }
+        }
+        liveVoices = live
+    }
+
+    /// The rake's "shhk": leaves sliding over each other, a slowly wandering band of air-like noise.
+    private func renderSwish(_ n: Int, _ left: UnsafeMutablePointer<Float>, _ right: UnsafeMutablePointer<Float>,
+                             from envStart: Float, to envEnd: Float) {
+        if envStart < 1e-4 && envEnd < 1e-4 && swishGain < 1e-5 { swishGain = 0; return }
+        let centre = min(max(1900 * exp(0.35 * rSwishTone), 1200), 4000)
+        swishBandL.set(centre, q: 0.75, sampleRate: sr); swishBandR.set(centre * 1.07, q: 0.75, sampleRate: sr)
+        swishHighL.set(700, q: 0.7, sampleRate: sr); swishHighR.set(700, q: 0.7, sampleRate: sr)
+        let motion = min(max(0.55 + 0.4 * rSwishWave, 0.1), 1.2)
+        let target = 0.36 * envEnd * envEnd.squareRoot() * motion
+        rPanSmooth += (rPan - rPanSmooth) * 0.2
+        let theta = (rPanSmooth + 1) * Float.pi / 4
+        let gl = cos(theta), gr = sin(theta)
+        var g = swishGain
+        let step = (target - g) / Float(n)
+        var bandL = swishBandL, bandR = swishBandR, highL = swishHighL, highR = swishHighR
+        let r = rng
+        for i in 0..<n {
+            g += step
+            let a = r.pointee.bipolar(), b = r.pointee.bipolar()
+            let l = highL.process(bandL.process(a).band).high
+            let rr = highR.process(bandR.process(0.55 * a + 0.835 * b).band).high
+            left[i] += l * g * gl
+            right[i] += rr * g * gr
+        }
+        swishBandL = bandL; swishBandR = bandR; swishHighL = highL; swishHighR = highR
+        swishGain = g
+    }
+
+    // MARK: Blower
+
+    private func renderBlower(_ n: Int, _ left: UnsafeMutablePointer<Float>, _ right: UnsafeMutablePointer<Float>) {
+        // Turbulence: two slow random processes (no LFO, so no periodic wobble).
+        ou(&bSlow, ou300); ou(&bFast, ou35); ou(&bWobble, ou150)
+        let flutterTarget = max(0.2, 1 + 0.2 * bSlow + 0.09 * bFast)
+        let spinNow = bSpin
+        let cutoff = (1300 + 2900 * spinNow) * (1 + 0.1 * bSlow)
+        airHighL.set(300, q: 0.7, sampleRate: sr); airHighR.set(300, q: 0.7, sampleRate: sr)
+        airLowL.set(cutoff, q: 0.55, sampleRate: sr); airLowR.set(cutoff * 1.05, q: 0.55, sampleRate: sr)
+        let body = 700 + 450 * spinNow
+        airBodyL.set(body, q: 1.1, sampleRate: sr); airBodyR.set(body * 1.04, q: 1.1, sampleRate: sr)
+        bPanSmooth += (bPan - bPanSmooth) * 0.15
+        let theta = (bPanSmooth + 1) * Float.pi / 4
+        let gl = cos(theta), gr = sin(theta)
+        var flutter = bFlutter
+        let flutterStep = (flutterTarget - flutter) / Float(n)
+        var spinA = bSpinA, spin = bSpin, phase = bPhase
+        var pl = pinkL, pr = pinkR
+        var highL = airHighL, highR = airHighR, lowL = airLowL, lowR = airLowR, bodyL = airBodyL, bodyR = airBodyR
+        let wobble = 1 + 0.003 * bWobble
+        let target = bTarget
+        let r = rng
+        let twoPi = 2 * Float.pi
+        for i in 0..<n {
+            // Two cascaded one-poles: an S-shaped spin-up/down that can never click.
+            let k = target > spinA ? kSpinUp : kSpinDown
+            spinA += (target - spinA) * k
+            spin += (spinA - spin) * k
+            flutter += flutterStep
+            let air = spin * spin.squareRoot() * flutter * 0.13
+            // Pink-ish air noise (Kellet's economy filter), band-limited to ~300-4000 Hz.
+            let wa = r.pointee.bipolar(), wb = r.pointee.bipolar()
+            let wl = wa, wr = 0.5 * wa + 0.866 * wb
+            pl.0 = 0.99765 * pl.0 + wl * 0.099046; pl.1 = 0.963 * pl.1 + wl * 0.2965164; pl.2 = 0.57 * pl.2 + wl * 1.0526913
+            pr.0 = 0.99765 * pr.0 + wr * 0.099046; pr.1 = 0.963 * pr.1 + wr * 0.2965164; pr.2 = 0.57 * pr.2 + wr * 1.0526913
+            let nl = (pl.0 + pl.1 + pl.2 + wl * 0.1848) * 0.2
+            let nr = (pr.0 + pr.1 + pr.2 + wr * 0.1848) * 0.2
+            let al = lowL.process(highL.process(nl).high).low
+            let ar = lowR.process(highR.process(nr).high).low
+            let sl = al + 0.8 * bodyL.process(al).band
+            let sr2 = ar + 0.8 * bodyR.process(ar).band
+            // Faint motor whine, rising a little with the spin.
+            phase += twoPi * (480 + 340 * spin) * wobble * invSr
+            if phase > twoPi { phase -= twoPi }
+            let s = sin(phase), c = cos(phase)
+            let whine = (s + 0.3 * 2 * s * c + 0.12 * s * (3 - 4 * s * s)) * spin * spin * 0.0045
+            left[i] += (sl * air + whine) * gl
+            right[i] += (sr2 * air + whine) * gr
+        }
+        bFlutter = flutter; bSpinA = spinA; bSpin = spin; bPhase = phase
+        pinkL = pl; pinkR = pr
+        airHighL = highL; airHighR = highR; airLowL = lowL; airLowR = lowR; airBodyL = bodyL; airBodyR = bodyR
+        if spin < 1e-5 && spinA < 1e-5 && target == 0 {
+            bSpin = 0; bSpinA = 0
+            pinkL = (0, 0, 0); pinkR = (0, 0, 0)
         }
     }
 
-    /// A papery micro-grain: 0.15-0.7 ms of band-passed noise in the upper range.
-    static func addGrain(_ buf: inout [Float], at start: Int, amp: Float, bright: Float, rng: inout CrunchRNG) {
-        let sr = Float(CrunchTuning.sampleRate)
-        let fc = min(10_000, rng.logUniform(2500, 9000) * bright)
-        let q = rng.uniform(1.2, 2.5)
-        let len = max(4, Int(rng.uniform(0.00015, 0.0007) * sr))
-        let total = min(buf.count - start, len + Int(2 * q / (Float.pi * fc) * sr))
-        guard total > 0 else { return }
-        var filter = CrunchBiquad.bandpass(fc, q: q)
-        for k in 0..<total {
-            let x: Float = k < len ? rng.bipolar() * sin(Float.pi * Float(k) / Float(len)) : 0
-            buf[start + k] += amp * filter.process(x)
+    // MARK: Master
+
+    private func master(_ n: Int, _ left: UnsafeMutablePointer<Float>, _ right: UnsafeMutablePointer<Float>) {
+        let threshold: Float = 0.09 * 0.09  // -21 dBFS RMS; only all three sounds at full get near it
+        var power = compPower, gain = compGain
+        for i in 0..<n {
+            var l = left[i], r = right[i]
+            power += ((l * l + r * r) * 0.5 - power) * kCompDetect
+            let wanted: Float = power > threshold ? pow(threshold / power, 1 / 3) : 1
+            gain += (wanted - gain) * (wanted < gain ? kCompAttack : kCompRelease)
+            l *= gain; r *= gain
+            left[i] = CrunchDSP.softClip(l)
+            right[i] = CrunchDSP.softClip(r)
         }
+        compPower = power; compGain = gain
     }
 
-    static func rms<C: Collection>(_ x: C) -> Float where C.Element == Float {
-        guard !x.isEmpty else { return 0 }
-        var sum: Float = 0
-        for v in x { sum += v * v }
-        return (sum / Float(x.count)).squareRoot()
-    }
-
-    static func dB(_ value: Float) -> Float { pow(10, value / 20) }
-}
-
-/// RBJ biquad, transposed direct form II.
-fileprivate struct CrunchBiquad {
-    private var b0: Float, b1: Float, b2: Float, a1: Float, a2: Float
-    private var z1: Float = 0, z2: Float = 0
-
-    private init(_ b0: Double, _ b1: Double, _ b2: Double, _ a0: Double, _ a1: Double, _ a2: Double) {
-        self.b0 = Float(b0 / a0); self.b1 = Float(b1 / a0); self.b2 = Float(b2 / a0)
-        self.a1 = Float(a1 / a0); self.a2 = Float(a2 / a0)
-    }
-
-    private static func omega(_ fc: Float) -> (cos: Double, alphaPerQ: Double) {
-        let w = 2 * Double.pi * Double(fc) / CrunchTuning.sampleRate
-        return (Foundation.cos(w), Foundation.sin(w) / 2)
-    }
-
-    /// Band-pass with 0 dB peak gain.
-    static func bandpass(_ fc: Float, q: Float) -> CrunchBiquad {
-        let (c, s) = omega(fc), alpha = s / Double(q)
-        return CrunchBiquad(alpha, 0, -alpha, 1 + alpha, -2 * c, 1 - alpha)
-    }
-
-    static func lowpass(_ fc: Float, q: Float) -> CrunchBiquad {
-        let (c, s) = omega(fc), alpha = s / Double(q)
-        return CrunchBiquad((1 - c) / 2, 1 - c, (1 - c) / 2, 1 + alpha, -2 * c, 1 - alpha)
-    }
-
-    static func highpass(_ fc: Float, q: Float) -> CrunchBiquad {
-        let (c, s) = omega(fc), alpha = s / Double(q)
-        return CrunchBiquad((1 + c) / 2, -(1 + c), (1 + c) / 2, 1 + alpha, -2 * c, 1 - alpha)
-    }
-
-    mutating func process(_ x: Float) -> Float {
-        let y = b0 * x + z1
-        z1 = b1 * x - a1 * y + z2
-        z2 = b2 * x - a2 * y
-        return y
+    /// Linear up to -7.5 dBFS, then a tanh knee that never exceeds -3 dBFS.
+    @inline(__always) private static func softClip(_ x: Float) -> Float {
+        let knee: Float = 0.42, ceiling: Float = 0.7
+        let a = abs(x)
+        if a <= knee { return x }
+        let y = knee + (ceiling - knee) * tanh((a - knee) / (ceiling - knee))
+        return x < 0 ? -y : y
     }
 }
 
-/// SplitMix64: tiny, fast and deterministic, so the bank sounds the same on every launch.
-fileprivate struct CrunchRNG {
-    private var state: UInt64
+/// Topology-preserving state-variable filter (stable under modulation).
+fileprivate struct CrunchSVF {
+    private var ic1: Float = 0, ic2: Float = 0
+    private var a1: Float = 1, a2: Float = 0, a3: Float = 0, k: Float = 1.4
 
-    init(seed: UInt64) { state = seed }
+    mutating func set(_ fc: Float, q: Float, sampleRate: Float) {
+        let g = tan(Float.pi * min(fc, 0.45 * sampleRate) / sampleRate)
+        k = 1 / q
+        a1 = 1 / (1 + g * (g + k))
+        a2 = g * a1
+        a3 = g * a2
+    }
 
-    mutating func next() -> UInt64 {
-        state &+= 0x9E37_79B9_7F4A_7C15
-        var z = state
-        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
-        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
-        return z ^ (z >> 31)
+    @inline(__always) mutating func process(_ v0: Float) -> (low: Float, band: Float, high: Float) {
+        let v3 = v0 - ic2
+        let v1 = a1 * ic1 + a2 * v3
+        let v2 = ic2 + a2 * ic1 + a3 * v3
+        ic1 = 2 * v1 - ic1
+        ic2 = 2 * v2 - ic2
+        return (v2, v1, v0 - k * v1 - v2)
+    }
+}
+
+/// xorshift64*: fast, allocation-free noise for the render thread.
+fileprivate struct CrunchNoise {
+    private var s: UInt64
+
+    init(seed: UInt64) { s = seed == 0 ? 0x9E37_79B9_7F4A_7C15 : seed }
+
+    @inline(__always) mutating func next() -> UInt64 {
+        s ^= s >> 12; s ^= s << 25; s ^= s >> 27
+        return s &* 0x2545_F491_4F6C_DD1D
     }
 
     /// Uniform in [0, 1).
-    mutating func unit() -> Float { Float(next() >> 40) * (1 / 16_777_216) }
-    mutating func uniform(_ a: Float, _ b: Float) -> Float { a + (b - a) * unit() }
-    mutating func bipolar() -> Float { unit() * 2 - 1 }
-    mutating func logUniform(_ a: Float, _ b: Float) -> Float { a * pow(b / a, unit()) }
+    @inline(__always) mutating func unit() -> Float { Float(next() >> 40) * (1 / 16_777_216) }
+    /// Uniform in [-1, 1).
+    @inline(__always) mutating func bipolar() -> Float {
+        Float(Int32(truncatingIfNeeded: next() >> 32)) * (1 / 2_147_483_648)
+    }
+    @inline(__always) mutating func uniform(_ a: Float, _ b: Float) -> Float { a + (b - a) * unit() }
+    @inline(__always) mutating func logUniform(_ a: Float, _ b: Float) -> Float { a * exp(unit() * log(b / a)) }
+    /// Roughly Gaussian, unit variance (sum of four uniforms).
+    @inline(__always) mutating func gauss() -> Float { (unit() + unit() + unit() + unit() - 2) * 1.732_050_8 }
 }

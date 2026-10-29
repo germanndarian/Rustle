@@ -50,6 +50,7 @@ final class ScreenOverlay {
 final class OverlayController {
     private let prefs: Preferences
     private let audio: CrunchAudio
+    private let tools: ToolController
     private let tracker = WindowTracker()
     private let power = PowerMonitor()
     private var overlays: [ScreenOverlay] = []
@@ -60,9 +61,10 @@ final class OverlayController {
     private let environment = ProcessInfo.processInfo.environment
     private let launchTime = CACurrentMediaTime()
 
-    init(prefs: Preferences, audio: CrunchAudio) {
+    init(prefs: Preferences, audio: CrunchAudio, tools: ToolController) {
         self.prefs = prefs
         self.audio = audio
+        self.tools = tools
         tracker.onUpdate = { [weak self] windows in self?.windowsChanged(windows) }
         power.onChange = { [weak self] in self?.apply() }
 
@@ -107,6 +109,13 @@ final class OverlayController {
         for overlay in overlays { overlay.scene.clearAll() }
     }
 
+    /// A tool was picked up or put away: the scenes need frames to follow it.
+    func toolChanged() {
+        if tools.equipped != .blower { audio.blower(level: 0, pan: 0) }
+        guard !power.isSuspended else { return }
+        for overlay in overlays { overlay.view.isPaused = false }
+    }
+
     private func windowsChanged(_ windows: [TrackedWindow]) {
         let windows = fakeWindows() + windows
         for overlay in overlays { overlay.scene.updateWindows(windows, spaceChangedAt: spaceChangedAt) }
@@ -148,12 +157,15 @@ final class OverlayController {
         let signature = currentLayoutSignature()
         guard signature != layoutSignature else { return }
         layoutSignature = signature
+        // Tool windows cover the old displays; put the tool away.
+        tools.equip(.none)
         for overlay in overlays { overlay.close() }
         overlays = NSScreen.screens.map { screen in
             let scale = screen.backingScaleFactor
             let art = textures[scale] ?? LeafTextures(scale: scale)
             textures[scale] = art
             let overlay = ScreenOverlay(screen: screen, art: art, audio: audio)
+            overlay.scene.toolProvider = { [weak tools] in tools?.input ?? ToolInput() }
             configureForTesting(overlay.scene, frame: screen.frame)
             return overlay
         }
@@ -166,18 +178,27 @@ final class OverlayController {
 
     /// Debug hooks, driven by environment variables:
     /// RUSTLE_SNAPSHOT=/path/prefix writes PNG frames, RUSTLE_FAKE_CURSOR sweeps a virtual cursor
-    /// through the pile, RUSTLE_PREFILL=n starts with n leaves on the ground.
+    /// through the pile, RUSTLE_PREFILL=n starts with n leaves on the ground, RUSTLE_FAKE_TOOL=rake|blower
+    /// uses that tool with the fake cursor (pressed for 8 s out of every 12).
     private func configureForTesting(_ scene: LeafScene, frame: CGRect) {
         if let prefix = environment["RUSTLE_SNAPSHOT"] {
             scene.snapshotPrefix = "\(prefix)-\(Int(frame.minX))"
         }
+        let fakeTool = environment["RUSTLE_FAKE_TOOL"].map { $0 == "blower" ? EquippedTool.blower : .rake }
         if environment["RUSTLE_FAKE_CURSOR"] != nil {
             let start = CACurrentMediaTime() + 10
             scene.cursorProvider = {
                 let t = CACurrentMediaTime() - start
                 guard t > 0 else { return CGPoint(x: frame.midX, y: frame.maxY - 5) }
-                return CGPoint(x: frame.minX + frame.width * (0.5 + 0.42 * CGFloat(sin(t * 0.9))),
-                               y: frame.minY + 22 + 16 * CGFloat(sin(t * 3.1)))
+                let y = fakeTool == .blower ? 110 + 30 * CGFloat(sin(t * 1.3)) : 22 + 16 * CGFloat(sin(t * 3.1))
+                return CGPoint(x: frame.minX + frame.width * (0.5 + 0.42 * CGFloat(sin(t * 0.9))), y: frame.minY + y)
+            }
+            if let fakeTool {
+                scene.toolProvider = {
+                    let t = CACurrentMediaTime() - start
+                    return ToolInput(tool: fakeTool, pressed: t > 0 && t.truncatingRemainder(dividingBy: 12) < 8,
+                                     facing: cos(t * 0.9) >= 0 ? 1 : -1)
+                }
             }
         }
     }

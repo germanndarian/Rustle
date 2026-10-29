@@ -5,11 +5,17 @@ import ServiceManagement
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let prefs = Preferences.shared
     private let audio = CrunchAudio()
+    private let tools = ToolController()
     private var overlays: OverlayController!
     private var statusItem: NSStatusItem!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        overlays = OverlayController(prefs: prefs, audio: audio)
+        overlays = OverlayController(prefs: prefs, audio: audio, tools: tools)
+        tools.onChange = { [weak self] in self?.overlays.toolChanged() }
+        if let name = ProcessInfo.processInfo.environment["RUSTLE_EQUIP"] {
+            // Debugging: start with a tool in hand.
+            tools.equip(name == "blower" ? .blower : .rake)
+        }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         let menu = NSMenu()
@@ -48,8 +54,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                               enabled: prefs.accumulate))
         menu.addItem(makeItem("Leaves on Windows", #selector(toggleLeavesOnWindows),
                               on: prefs.leavesOnWindows && !prefs.behindWindows, enabled: !prefs.behindWindows))
-        menu.addItem(makeItem("Crunch Sound", #selector(toggleCrunch), on: prefs.crunchSound))
+        menu.addItem(makeItem("Sound", #selector(toggleCrunch), on: prefs.crunchSound))
         menu.addItem(makeItem("Clear Leaves", #selector(clearLeaves), on: false))
+
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem.sectionHeader(title: "Tools"))
+        for (tool, title) in [(EquippedTool.rake, "Rake"), (.blower, "Leaf Blower")] {
+            let item = makeItem(title, #selector(toggleTool(_:)), on: tools.equipped == tool)
+            item.representedObject = tool == .rake ? "rake" : "blower"
+            item.indentationLevel = 1
+            if let kind = tool.kind {
+                let icon = NSImage(cgImage: ToolArt.menuIcon(kind), size: NSSize(width: 18, height: 18))
+                icon.isTemplate = true
+                item.image = icon
+            }
+            menu.addItem(item)
+        }
 
         menu.addItem(.separator())
         menu.addItem(makeItem("Behind Windows", #selector(toggleBehindWindows), on: prefs.behindWindows))
@@ -119,6 +139,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func clearLeaves() {
         overlays.clearLeaves()
+    }
+
+    @objc private func toggleTool(_ sender: NSMenuItem) {
+        tools.toggle(sender.representedObject as? String == "rake" ? .rake : .blower)
     }
 
     @objc private func toggleBehindWindows() {

@@ -70,6 +70,8 @@ private struct ValueNoise {
 
 private enum LeafState {
     case airborne, settling, resting, fading, removed
+    /// Caught in the rake's tines and dragged along with it.
+    case carried
 }
 
 private final class Leaf {
@@ -116,6 +118,9 @@ private final class Leaf {
     var ephemeral = false
     var fadeDelay: CGFloat = 0
     var fadeT: CGFloat = 0
+
+    // Where it rides in the rake, relative to the tine tips
+    var carryDX: CGFloat = 0, carryDY: CGFloat = 0
 
     init(node: SKSpriteNode, size: CGFloat, coverage: CGFloat) {
         self.node = node
@@ -207,6 +212,7 @@ private struct Gust {
 final class LeafScene: SKScene {
     var crunchEnabled = true
     var cursorProvider: () -> CGPoint = { NSEvent.mouseLocation }
+    var toolProvider: () -> ToolInput = { ToolInput() }
     var snapshotPrefix: String?
 
     private(set) var settings = SceneSettings()
@@ -239,6 +245,13 @@ final class LeafScene: SKScene {
     private var relaxTimer: TimeInterval = 0
     private var cursorLast: CGPoint?
     private var cursorVelocity = CGVector.zero
+
+    private var carried: [Leaf] = []
+    private var rakeHead = CGPoint.zero
+    private var rakeFacing: CGFloat = 1
+    private let rakeCapacity = 36
+    private var puffCarry: CGFloat = 0
+    private lazy var puffTexture = Self.makePuffTexture()
 
     private var statsTimer: TimeInterval = 0
     private var frames = 0
@@ -331,7 +344,7 @@ final class LeafScene: SKScene {
 
         scheduleGusts()
         spawn(d)
-        handleCursor(d)
+        handlePointer(d)
         liftWithGusts(d)
         stepLeaves(d)
 
@@ -351,7 +364,7 @@ final class LeafScene: SKScene {
 
     private func adjustFrameRate() {
         guard let view else { return }
-        let busy = settings.fall != .off || !active.isEmpty || !gusts.isEmpty
+        let busy = settings.fall != .off || !active.isEmpty || !gusts.isEmpty || toolProvider().tool != .none
         let fps = busy ? (settings.savePower ? 30 : 60) : 15
         if view.preferredFramesPerSecond != fps { view.preferredFramesPerSecond = fps }
         if !busy && totalResting == 0 && stashed.isEmpty && vanished.isEmpty { view.isPaused = true }
@@ -538,6 +551,7 @@ final class LeafScene: SKScene {
             case .airborne: stepAirborne(leaf, dt)
             case .settling: stepSettling(leaf, dt)
             case .fading: stepFading(leaf, dt)
+            case .carried: stepCarried(leaf, dt)
             case .resting, .removed: break
             }
             if leaf.state == .resting || leaf.state == .removed {
@@ -866,20 +880,34 @@ final class LeafScene: SKScene {
 
     // MARK: Cursor
 
-    private func handleCursor(_ dt: CGFloat) {
+    private func handlePointer(_ dt: CGFloat) {
         let global = cursorProvider()
         let p = CGPoint(x: global.x - origin.x, y: global.y - origin.y)
         defer { cursorLast = p }
+        let tool = toolProvider()
+        if tool.tool != .rake && !carried.isEmpty { releaseCarried() }
         guard let last = cursorLast else { return }
         let dx = p.x - last.x, dy = p.y - last.y
         if abs(dx) > 600 || abs(dy) > 600 {
             cursorVelocity = .zero
+            if !carried.isEmpty { releaseCarried() }
             return
         }
         let blend = 1 - exp(-dt * 30)
         cursorVelocity.dx += (dx / dt - cursorVelocity.dx) * blend
         cursorVelocity.dy += (dy / dt - cursorVelocity.dy) * blend
-        guard dx != 0 || dy != 0, p.x > -40, p.x < size.width + 40, p.y > -40, p.y < size.height + 40 else { return }
+        let onScreen = p.x > -40 && p.x < size.width + 40 && p.y > -40 && p.y < size.height + 40
+        switch tool.tool {
+        case .none:
+            if onScreen && (dx != 0 || dy != 0) { kickWithCursor(from: last, to: p) }
+        case .rake:
+            rake(from: last, to: p, tool: tool, onScreen: onScreen)
+        case .blower:
+            if onScreen { blow(at: p, tool: tool, dt: dt) }
+        }
+    }
+
+    private func kickWithCursor(from last: CGPoint, to p: CGPoint) {
         let speed = hypot(cursorVelocity.dx, cursorVelocity.dy)
         guard speed > 30 else { return }
 
@@ -947,6 +975,219 @@ final class LeafScene: SKScene {
             leaf.vy += cursorVelocity.dy * 0.12 * falloff
             leaf.spin += rnd(-3, 3) * falloff
         }
+    }
+
+    // MARK: Rake
+
+    /// The highest pile or ledge top just under the rake, if the tines are low enough to touch it.
+    private func supportTop(under p: CGPoint) -> CGFloat? {
+        var best: CGFloat?
+        if let c = ground.column(at: p.x) { best = ground.top(c) }
+        if settings.onWindows {
+            for s in windowSurfaces.values {
+                guard let c = s.column(at: p.x), s.visible[c] else { continue }
+                let top = s.top(c)
+                if top <= p.y + 10, top > (best ?? -.infinity) { best = top }
+            }
+        }
+        guard let top = best, p.y - top < 28 else { return nil }
+        return top
+    }
+
+    private func rake(from last: CGPoint, to p: CGPoint, tool: ToolInput, onScreen: Bool) {
+        rakeHead = p
+        rakeFacing = tool.facing
+        // Leaves only stay in the tines while the rake is pressed against something.
+        guard onScreen, tool.pressed, supportTop(under: p) != nil else {
+            if !carried.isEmpty { releaseCarried() }
+            return
+        }
+        let speed = hypot(cursorVelocity.dx, cursorVelocity.dy)
+        if speed > 12 {
+            var hits: [Leaf] = []
+            let minX = min(last.x, p.x) - 30, maxX = max(last.x, p.x) + 30
+            let minY = min(last.y, p.y) - 20, maxY = max(last.y, p.y) + 14
+            gatherLeaves(on: ground, minX: minX, maxX: maxX, minY: minY, maxY: maxY, into: &hits)
+            if settings.onWindows {
+                for s in windowSurfaces.values { gatherLeaves(on: s, minX: minX, maxX: maxX, minY: minY, maxY: maxY, into: &hits) }
+            }
+            hits.sort { $0.y > $1.y }
+            for leaf in hits.prefix(8) {
+                detach(leaf)
+                if carried.count < rakeCapacity {
+                    leaf.state = .carried
+                    leaf.ephemeral = false
+                    leaf.carryDX = rnd(-4, 26)
+                    leaf.carryDY = rnd(-3, 12) + CGFloat(carried.count) * 0.4
+                    leaf.node.zPosition = Self.airborneZ
+                    carried.append(leaf)
+                    activate(leaf)
+                } else {
+                    // The rake is full: extra leaves tumble along ahead of it.
+                    leaf.vx = cursorVelocity.dx * rnd(0.6, 1.0)
+                    leaf.vy = rnd(30, 90)
+                    launch(leaf, spin: 0.4)
+                }
+            }
+        }
+        if !carried.isEmpty && speed > 8 && crunchEnabled {
+            let intensity = clamp(CGFloat(carried.count) / CGFloat(rakeCapacity) * 0.6 + speed / 1500 * 0.4, 0, 1)
+            audio.rake(intensity: Float(intensity), pan: Float(clamp(p.x / size.width * 2 - 1, -1, 1)))
+        }
+    }
+
+    private func gatherLeaves(on s: Surface, minX: CGFloat, maxX: CGFloat, minY: CGFloat, maxY: CGFloat, into hits: inout [Leaf]) {
+        guard s.count > 0, maxY >= s.baseY - 10, minY <= s.baseY + s.maxHeight + 10,
+              let c0 = s.column(at: max(minX, s.minX)), let c1 = s.column(at: min(maxX, s.maxX - 0.01)), c0 <= c1 else { return }
+        for c in c0...c1 where s.visible[c] {
+            for leaf in s.stacks[c].reversed() {
+                if leaf.y < minY { break }
+                if leaf.y <= maxY { hits.append(leaf) }
+            }
+        }
+    }
+
+    private func stepCarried(_ l: Leaf, _ dt: CGFloat) {
+        let tx = rakeHead.x + rakeFacing * l.carryDX
+        let ty = rakeHead.y + l.carryDY
+        let k = 1 - exp(-16 * dt)
+        let nx = l.x + (tx - l.x) * k, ny = l.y + (ty - l.y) * k
+        l.vx = (nx - l.x) / dt
+        l.vy = (ny - l.y) / dt
+        l.x = nx
+        l.y = ny
+        // Leaves roll and jostle in the tines as they're dragged.
+        l.angle -= clamp(l.vx * 0.004, -3, 3) * dt
+        let flat: CGFloat = l.xScale < 0 ? -0.6 : 0.6
+        l.xScale += (flat - l.xScale) * k * 0.3
+        if l.depthShade > 0.001 { l.depthShade *= exp(-4 * dt) }
+        render(l)
+    }
+
+    /// Lets go of everything in the rake; the leaves settle where they are.
+    private func releaseCarried() {
+        for leaf in carried where leaf.state == .carried {
+            leaf.vx = clamp(leaf.vx * 0.4, -300, 300) + rnd(-15, 15)
+            leaf.vy = rnd(-10, 25)
+            leaf.ignoredSurface = nil
+            leaf.state = .airborne
+        }
+        carried.removeAll()
+    }
+
+    // MARK: Leaf blower
+
+    private func blow(at p: CGPoint, tool: ToolInput, dt: CGFloat) {
+        let pan = Float(clamp(p.x / size.width * 2 - 1, -1, 1))
+        // Only the display under the cursor drives the blower's sound.
+        if crunchEnabled && CGRect(origin: .zero, size: size).contains(p) {
+            audio.blower(level: tool.pressed ? 1 : 0, pan: pan)
+        }
+        guard tool.pressed else { return }
+        let a = tool.blowerAngle
+        let dir = CGVector(dx: tool.facing * cos(a), dy: -sin(a))
+        let length: CGFloat = 380
+        spawnPuffs(from: p, dir: dir, dt: dt)
+
+        // Where the jet's axis meets the ground: from there the air fans out along the pile.
+        var impact: CGPoint?
+        if dir.dy < -0.05 {
+            let groundY = ground.column(at: p.x).map { ground.top($0) } ?? 0
+            let along = (p.y - groundY) / -dir.dy
+            if along > 0 && along < length { impact = CGPoint(x: p.x + dir.dx * along, y: groundY) }
+        }
+        let impactStrength = impact.map { 1 - hypot($0.x - p.x, $0.y - p.y) / length } ?? 0
+
+        func strength(at q: CGPoint) -> CGFloat {
+            let rx = q.x - p.x, ry = q.y - p.y
+            var s: CGFloat = 0
+            let along = rx * dir.dx + ry * dir.dy
+            if along > -8 && along < length {
+                let perp = abs(rx * dir.dy - ry * dir.dx)
+                let width = 16 + max(0, along) * 0.32
+                if perp < width { s = (1 - max(0, along) / length) * (1 - perp / width).squareRoot() }
+            }
+            if let impact, impactStrength > 0 {
+                let ahead = (q.x - impact.x) * tool.facing
+                if ahead > -30 && ahead < 260 && q.y - impact.y < 30 {
+                    s = max(s, impactStrength * 0.8 * (1 - max(0, ahead) / 260))
+                }
+            }
+            return s
+        }
+
+        for leaf in active where leaf.state == .airborne {
+            let s = strength(at: CGPoint(x: leaf.x, y: leaf.y))
+            guard s > 0 else { continue }
+            leaf.vx += dir.dx * 2600 * s * dt
+            leaf.vy += (dir.dy * 2600 + 900) * s * dt
+            leaf.spin += rnd(-40, 40) * s * dt
+            leaf.flipRate += randomSign() * 30 * s * dt
+        }
+
+        var lifted = 0
+        let end = CGPoint(x: p.x + dir.dx * length, y: p.y + dir.dy * length)
+        let reach = 16 + length * 0.32
+        var minX = min(p.x, end.x) - reach, maxX = max(p.x, end.x) + reach
+        if let impact {
+            minX = min(minX, impact.x - 260)
+            maxX = max(maxX, impact.x + 260)
+        }
+        for s in [ground!] + Array(windowSurfaces.values) where s.count > 0 {
+            guard let c0 = s.column(at: max(minX, s.minX)), let c1 = s.column(at: min(maxX, s.maxX - 0.01)), c0 <= c1 else { continue }
+            var candidates: [(Leaf, CGFloat)] = []
+            for c in c0...c1 where s.visible[c] {
+                // Only the top few leaves of each column feel the air.
+                for leaf in s.stacks[c].suffix(3) {
+                    let st = strength(at: CGPoint(x: leaf.x, y: leaf.y))
+                    if st > 0.02 && chance(16 * st * dt) { candidates.append((leaf, st)) }
+                }
+            }
+            for (leaf, st) in candidates.prefix(30) {
+                detach(leaf)
+                leaf.vx = dir.dx * rnd(250, 520) * st + tool.facing * rnd(120, 300) * st
+                leaf.vy = rnd(70, 230) * st + 20
+                launch(leaf, spin: st + 0.3)
+                lifted += 1
+            }
+        }
+        if lifted > 0 && crunchEnabled {
+            audio.crunch(intensity: Float(min(0.55, 0.14 + CGFloat(lifted) * 0.05)), pan: pan)
+        }
+    }
+
+    /// Faint wisps of air streaming from the nozzle.
+    private func spawnPuffs(from p: CGPoint, dir: CGVector, dt: CGFloat) {
+        puffCarry += 36 * dt
+        while puffCarry >= 1 {
+            puffCarry -= 1
+            let puff = SKSpriteNode(texture: puffTexture, size: CGSize(width: 14, height: 14))
+            let start = rnd(4, 24)
+            let side = rnd(-5, 5)
+            puff.position = CGPoint(x: p.x + dir.dx * start - dir.dy * side, y: p.y + dir.dy * start + dir.dx * side)
+            puff.alpha = rnd(0.10, 0.2)
+            puff.zPosition = Self.airborneZ + 10
+            puff.setScale(0.6)
+            let travel = rnd(170, 260)
+            let spread = rnd(-0.22, 0.22)
+            let move = SKAction.moveBy(x: (dir.dx - dir.dy * spread) * travel, y: (dir.dy + dir.dx * spread) * travel, duration: 0.45)
+            move.timingMode = .easeOut
+            puff.run(.sequence([.group([move, .scale(to: rnd(1.6, 2.4), duration: 0.45), .fadeOut(withDuration: 0.45)]),
+                                .removeFromParent()]))
+            leafLayer.addChild(puff)
+        }
+    }
+
+    private static func makePuffTexture() -> SKTexture {
+        let px = 32
+        let ctx = CGContext(data: nil, width: px, height: px, bitsPerComponent: 8, bytesPerRow: 0,
+                            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        let colors = [CGColor(gray: 1, alpha: 0.9), CGColor(gray: 1, alpha: 0)]
+        let gradient = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB), colors: colors as CFArray, locations: [0, 1])!
+        let c = CGPoint(x: CGFloat(px) / 2, y: CGFloat(px) / 2)
+        ctx.drawRadialGradient(gradient, startCenter: c, startRadius: 0, endCenter: c, endRadius: CGFloat(px) / 2, options: [])
+        return SKTexture(cgImage: ctx.makeImage()!)
     }
 
     // MARK: Windows
